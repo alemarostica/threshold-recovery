@@ -1,0 +1,26 @@
+# Eseguibili
+launch-server
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Ignora tutti i file in data
+/data/*.json
+
+# Roba di Go
+vendor/
+go.sum
+*.test
+*.out
+
+# Uso emacs, ma prima o poi qualcuno toccherà questo progetto con almeno un altro IDE che lascia roba
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Prego che nessuno tocchi questo progetto con Mac
+.DS_Store
+Thumbs.db
