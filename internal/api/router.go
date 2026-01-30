@@ -39,7 +39,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.handleRegister)
 	mux.HandleFunc("POST /liveness", h.handleLiveness)
 	mux.HandleFunc("GET /status/{id}", h.handleStatus)
-	mux.HandleFunc("POST /recover/sign", h.handleSignRecovery)
+	mux.HandleFunc("POST /recover", h.handleSignRecovery)
 }
 
 // Returns the status of a specific wallet
@@ -77,7 +77,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Save it
 	if err := h.Service.RegisterWallet(wallet); err != nil {
-		http.Error(w, "Failed to register wallet", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 

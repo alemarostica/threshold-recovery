@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"encoding/json"
 	// "errors"
 	"os"
@@ -26,9 +27,20 @@ func (s *JSONStore) GetWallet(id string) (*core.Wallet, error) {
 		return nil, err
 	}
 	var w core.Wallet
-	// Funky name for a function that parses JSON
+	// Funky name for a function that parses JSON, it also appears to use some base64 magic
 	err = json.Unmarshal(data, &w)
 	return &w, err
+}
+
+// Creates a new wallet to local storage
+func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
+	path := filepath.Join(s.DataDir, w.ID+".json")
+
+	// Check if file exists
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("wallet with ID %s already exists", w.ID)
+	}
+	return s.save(w)
 }
 
 // Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
@@ -38,11 +50,11 @@ func (s *JSONStore) UpdateLiveness(id string) error {
 		return err
 	}
 	w.LastActivity = time.Now()
-	return s.RegisterWallet(w)
-}
+	return s.save(w)
+} 
 
-// Writes the wallet to local storage
-func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
+// Private helper to write files
+func (s *JSONStore) save(w *core.Wallet) error {
 	data, err := json.MarshalIndent(w, "", "  ")
 	if err != nil {
 		return err
