@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// The JSONStore is simply a path to a directory
 type JSONStore struct {
 	DataDir string
 }
@@ -17,6 +18,7 @@ func NewJSONStore(dir string) *JSONStore {
 	return &JSONStore{DataDir: dir}
 }
 
+// This take a wallet name and finds the corresponding file on local storage
 func (s *JSONStore) GetWallet(id string) (*core.Wallet, error) {
 	path := filepath.Join(s.DataDir, id+".json")
 	data, err := os.ReadFile(path)
@@ -24,10 +26,12 @@ func (s *JSONStore) GetWallet(id string) (*core.Wallet, error) {
 		return nil, err
 	}
 	var w core.Wallet
+	// Funky name for a function that parses JSON
 	err = json.Unmarshal(data, &w)
 	return &w, err
 }
 
+// Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
 func (s *JSONStore) UpdateLiveness(id string) error {
 	w, err := s.GetWallet(id)
 	if err != nil {
@@ -37,6 +41,7 @@ func (s *JSONStore) UpdateLiveness(id string) error {
 	return s.RegisterWallet(w)
 }
 
+// Writes the wallet to local storage
 func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
 	data, err := json.MarshalIndent(w, "", "  ")
 	if err != nil {

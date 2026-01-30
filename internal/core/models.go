@@ -6,6 +6,7 @@ import "time"
 
 type WalletState string
 
+// Various possible states of the wallet
 const (
 	StateActive   WalletState = "ACTIVE"
 	StateDormant  WalletState = "DORMANT"
@@ -28,6 +29,7 @@ type Wallet struct {
 	EncryptedShare []byte `json:"encrypted_share"`
 }
 
+// Returns whether the wallet is in a recoverable state
 func (w *Wallet) IsRecoverable() bool {
 	// If now > LastActivity + Threshold OR now > ExpirationDate
 	deadline := w.LastActivity.Add(w.InactivityThreshold)

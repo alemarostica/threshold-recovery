@@ -7,7 +7,7 @@ launch-server
 *.dylib
 
 # Ignora tutti i file in data
-/data/*.json
+/data/*
 
 # Roba di Go
 vendor/
@@ -20,6 +20,7 @@ go.sum
 .idea/
 *.swp
 *.swo
+.#*
 
 # Prego che nessuno tocchi questo progetto con Mac
 .DS_Store
