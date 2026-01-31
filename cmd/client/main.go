@@ -16,30 +16,30 @@ const (
 )
 
 func main() {
-	walletID := "demo_wallet_01"
+	pubKey := []byte("mock_pub_key_123")
+	pubKeyHex := fmt.Sprintf("%x", pubKey)
 
 	fmt.Println("STARTING SCENARIO: Threshold Recovery Simulation")
 	fmt.Println("------------------------------------------------")
 
 	// Register
-	fmt.Printf("\n[1] Registering wallet '%s' with %s inactivity threshold...\n", walletID, testThreshold)
+	fmt.Printf("\n[1] Registering wallet '%s' with %s inactivity threshold...\n", pubKey, testThreshold)
 
 	registerPayload := map[string]interface{}{
-		"id":                   walletID,
-		"public_key":           []byte("mock_pub_key_123"),
+		"public_key":           pubKey,
 		"encrypted_share":      []byte("mock_secret_share"),
 		"share_commitment":     []byte("mock_commitment"),
 		"inactivity_threshold": testThreshold.Nanoseconds(),
 	}
 
-	if status := sendRequest("POST", "/register", registerPayload); status != 201 {
+	if status := sendRequest("POST", "/register", registerPayload); status != http.StatusCreated {
 		log.Fatalf("Registration failed with status: %d", status)
 	}
 
 	// Check status
 	// Should not be recoverable
 	fmt.Println("\n [2] Checking status immediately...")
-	checkStatus(walletID)
+	checkStatus(pubKeyHex)
 
 	// Send liveness ping
 	fmt.Println("\n[3] Sending liveness signal...")
@@ -47,9 +47,9 @@ func main() {
 	ts := time.Now().Unix()
 	// Works because of MockVerifier
 	livenessPayload := map[string]interface{}{
-		"id":        walletID,
-		"timestamp": ts,
-		"signature": []byte("valid_signature_placeholder"),
+		"public_key": pubKey,
+		"timestamp":  ts,
+		"signature":  []byte("valid_signature_placeholder"),
 	}
 
 	if status := sendRequest("POST", "/liveness", livenessPayload); status != 200 {
@@ -59,7 +59,7 @@ func main() {
 	// Attempt early recovery, should fail
 	fmt.Println("\n[4] Attempting recovery too early...")
 	signPayload := map[string]interface{}{
-		"id":      walletID,
+		"public_key": pubKey,
 		"message": "transaction_payload_hex",
 	}
 	// 403 Forbidden is expected
@@ -71,7 +71,7 @@ func main() {
 
 	// Check status after timeout, should be recoverable
 	fmt.Println("\n[6] Checking status after timeout...")
-	checkStatus(walletID)
+	checkStatus(pubKeyHex)
 
 	// Attempt recovery
 	fmt.Println("\n[7] Attempting recovery after timeout...")

@@ -10,6 +10,7 @@ type Config struct {
 	ServerPort          string `json:"server_port"`
 	DataDir             string `json:"data_dir"`
 	DefaultTimeoutHours int    `json:"default_timeout_hours"`
+	HMACSecret          string `json:"hmac_secret"`
 }
 
 // This loads the configuration JSON file and parses it into a Config var

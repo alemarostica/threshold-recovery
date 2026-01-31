@@ -2,6 +2,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,8 +15,8 @@ import (
 // Interface to swap memory more easily
 // Every WalletService var implements the following functions implicitly
 type WalletService interface {
-	GetWallet(id string) (*core.Wallet, error)
-	UpdateLiveness(id string) error
+	GetWallet(pubKey []byte) (*core.Wallet, error)
+	UpdateLiveness(pubKey []byte) error
 	RegisterWallet(w *core.Wallet) error
 }
 
@@ -44,6 +45,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Returns the status of a specific wallet
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
+
 	// Decode the request
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -52,8 +55,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the input
-	if req.ID == "" || len(req.PublicKey) == 0 {
-		http.Error(w, "Missing ID or Publick Key", http.StatusBadRequest)
+	if len(req.PublicKey) == 0 {
+		http.Error(w, "Missin Publick Key", http.StatusBadRequest)
 		return
 	}
 
@@ -65,7 +68,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Map the received DTO to the model
 	wallet := &core.Wallet{
-		ID:                  req.ID,
 		PublicKey:           req.PublicKey,
 		EncryptedShare:      req.EncryptedShare,
 		LastActivity:        time.Now(),
@@ -81,13 +83,9 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	details := fmt.Sprintf("PKey: %s, share: %s, threshold: %s, exp: %s",
-		wallet.PublicKey,
-		wallet.EncryptedShare,
-		wallet.InactivityThreshold,
-		wallet.ExpirationDate,
-	)
-	h.Audit.Log(wallet.ID, core.EventRegister, details)
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	h.Audit.Log(pubKeyHex, core.EventRegister, "Success")
+
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(`{"status":"registered"}`))
 }
@@ -102,59 +100,60 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 
 	// Let's try to prevent replay attacks
 	requestTime := time.Unix(req.Timestamp, 0)
-	now := time.Now()
-
-	// 5 minute window for clock skew/latency
-	window := 5 * time.Minute
-	if requestTime.Before(now.Add(-window)) || requestTime.After(now.Add(window)) {
-		h.Audit.Log(req.ID, core.EventLiveness, "REPLAY ATTACK DETECTED: Timestamp outside window")
-		http.Error(w, "Request timestamp is too old or too far in the future", http.StatusUnauthorized)
+	if time.Since(requestTime).Abs() > 5*time.Minute {
+		http.Error(w, "Invalid timestamp", http.StatusUnauthorized)
 		return
 	}
 
 	// Retrieve the wallet
-	wallet, err := h.Service.GetWallet(req.ID)
+	wallet, err := h.Service.GetWallet(req.PublicKey)
 	if err != nil {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
 	}
 
 	// Verify the signature
-	msg := fmt.Sprintf("%s:%d", req.ID, req.Timestamp)
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
+
 	if !h.Verifier.VerifySignature(wallet.PublicKey, []byte(msg), req.Signature) {
-		h.Audit.Log(req.ID, core.EventLiveness, "Invalid signature for liveness")
-		http.Error(w, "Invalid signature", http.StatusUnauthorized)
+		h.Audit.Log(pubKeyHex, core.EventLiveness, "Invalid Signature")
+		http.Error(w, "Invalid Signature", http.StatusUnauthorized)
 		return
 	}
 
 	// Update Liveness
-	if err := h.Service.UpdateLiveness(req.ID); err != nil {
+	if err := h.Service.UpdateLiveness(req.PublicKey); err != nil {
 		http.Error(w, "Failed to update liveness", http.StatusInternalServerError)
 		return
 	}
 
-	h.Audit.Log(req.ID, core.EventLiveness, "Liveness updated via signed timestamp")
+	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"liveness_updated"}`))
 }
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	pubKeyHex := r.PathValue("id")
+	pubKey, err := hex.DecodeString(pubKeyHex)
+	if err != nil {
+		http.Error(w, "Invalid Public Key Hex", http.StatusBadRequest)
+		return
+	}
 
-	wallet, err := h.Service.GetWallet(id)
+	wallet, err := h.Service.GetWallet(pubKey)
 	if err != nil {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
 	}
 
 	response := map[string]interface{}{
-		"id":                  wallet.ID,
 		"recoverable":         wallet.IsRecoverable(),
 		"last_activity":       wallet.LastActivity,
 		"time_until_recovery": time.Until(wallet.LastActivity.Add(wallet.InactivityThreshold)).String(),
 	}
 
-	h.Audit.Log(wallet.ID, core.EventStatus, "")
+	h.Audit.Log(pubKeyHex, core.EventStatus, "")
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -166,25 +165,25 @@ func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Recover wallet
-	wallet, err := h.Service.GetWallet(req.ID)
+	wallet, err := h.Service.GetWallet(req.PublicKey)
 	if err != nil {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
 	}
 
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+
 	// Verify if user is dead
 	if !wallet.IsRecoverable() {
-		h.Audit.Log(wallet.ID, core.EventSignBlocked, "Somebody tried to recover wallet while user is still alive!")
-		http.Error(w, "RECOVERY LOCKED: User is active", http.StatusForbidden)
+		h.Audit.Log(pubKeyHex, core.EventSignBlocked, "Somebody tried to recover wallet while user is still alive!")
+		http.Error(w, "RECOVERY LOCKED", http.StatusForbidden)
 		return
 	}
 
 	// Here dead-man switch must have triggered
 	// Server accepts using its share
 
-	msgBytes := []byte(req.Message)
-
-	partialSig, err := h.Verifier.SignPartial(wallet.EncryptedShare, msgBytes)
+	partialSig, err := h.Verifier.SignPartial(wallet.EncryptedShare, []byte(req.Message))
 	if err != nil {
 		h.Audit.Log(wallet.ID, core.EventSignAttempt, "")
 		http.Error(w, "Signing failed", http.StatusInternalServerError)

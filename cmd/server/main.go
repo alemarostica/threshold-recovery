@@ -30,7 +30,7 @@ func main() {
 
 	// Simple JSON storage, struct in internal/store/json_store.go
 	// Will it be good enough?
-	fileStore := store.NewJSONStore(cfg.DataDir)
+	fileStore := store.NewJSONStore(cfg.DataDir, cfg.HMACSecret)
 
 	// Setup audit Logger
 	auditLogger := core.NewAuditLogger(filepath.Join(cfg.DataDir, "audit.log"))

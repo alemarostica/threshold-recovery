@@ -6,7 +6,8 @@ launch-server
 *.so
 *.dylib
 
-# Ignora tutti i file in data
+# Ignora tutti i file nelle directory di esecuzione
+/dist_shares/*
 /data/*
 
 # Roba di Go
