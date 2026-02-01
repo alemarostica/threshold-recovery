@@ -10,13 +10,21 @@ build:
 	@echo "Building the server..."
 	go build -o $(BINARY_NAME) $(MAIN_PATH)
 
-run:
+server:
 	@echo "Starting the server..."
 	go run $(MAIN_PATH)
 
-client:
+test-client:
 	@echo "Running simulation client..."
 	go run cmd/client/main.go
+
+dealer:
+	@echo "Running dealer CLI..."
+	go run cmd/dealer/main.go
+
+shareholder:
+	@echo "Running share pickup..."
+	go run cmd/shareholder/main.go
 
 clean:
 	@echo "Cleaning up..."

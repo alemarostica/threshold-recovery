@@ -9,12 +9,14 @@ import (
 type AuditEvent string
 
 const (
-	EventStatus      AuditEvent = "STATUS"
-	EventRegister    AuditEvent = "REGISTER"
-	EventLiveness    AuditEvent = "LIVENESS_UPDATE"
-	EventSignAttempt AuditEvent = "SIGN_ATTEMPT"
-	EventSignSuccess AuditEvent = "SIGN_SUCCESS"
-	EventSignBlocked AuditEvent = "SIGN_BLOCKED_ACTIVE"
+	EventStatus            AuditEvent = "STATUS"
+	EventRegister          AuditEvent = "REGISTER"
+	EventLiveness          AuditEvent = "LIVENESS_UPDATE"
+	EventSignAttempt       AuditEvent = "SIGN_ATTEMPT"
+	EventSignSuccess       AuditEvent = "SIGN_SUCCESS"
+	EventSignBlocked       AuditEvent = "SIGN_BLOCKED_ACTIVE"
+	EventSharePickup       AuditEvent = "SHARE_PICKUP"
+	EventSharePickupDenied AuditEvent = "SHARE_PICKUP_DENIED"
 )
 
 // Every security log is appended to a file

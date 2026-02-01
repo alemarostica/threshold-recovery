@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"threshold-recovery/internal/core"
 	"threshold-recovery/internal/crypto"
 	"time"
@@ -18,6 +19,9 @@ type WalletService interface {
 	GetWallet(pubKey []byte) (*core.Wallet, error)
 	UpdateLiveness(pubKey []byte) error
 	RegisterWallet(w *core.Wallet) error
+	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
+	SaveParticipant(p *core.Participant) error
+	GetParticipant(id string) (*core.Participant, error)
 }
 
 type Handler struct {
@@ -41,6 +45,45 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /liveness", h.handleLiveness)
 	mux.HandleFunc("GET /status/{id}", h.handleStatus)
 	mux.HandleFunc("POST /recover", h.handleSignRecovery)
+	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
+	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
+	mux.HandleFunc("GET /participants", h.handleGetParticipants)
+}
+
+func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
+	var req SharePickupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	// Derive the slot ID from the provided friend's public key
+	slotID := h.Service.DeriveFriendSlot(req.PublicKey, req.FriendPubKey)
+
+	// Gatekeep is the user is not dead
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(wallet.ID, core.EventSharePickupDenied, "Slot "+slotID+" tried to pick up share too early")
+		http.Error(w, "RECOVERY LOCKED: User is still active.", http.StatusForbidden)
+		return
+	}
+
+	// Authentication will have to be here, which kind?
+	shareBlob, ok := wallet.FriendShares[slotID]
+	if !ok {
+		http.Error(w, "No share found for this ID", http.StatusNotFound)
+		return
+	}
+
+	h.Audit.Log(wallet.ID, core.EventSharePickup, "Friend "+slotID+" collected share")
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(shareBlob)
 }
 
 // Returns the status of a specific wallet
@@ -56,7 +99,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the input
 	if len(req.PublicKey) == 0 {
-		http.Error(w, "Missin Publick Key", http.StatusBadRequest)
+		http.Error(w, "Missing Public Key", http.StatusBadRequest)
 		return
 	}
 
@@ -64,6 +107,12 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !h.Verifier.VerifyShare(req.EncryptedShare, req.ShareCommitment) {
 		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
 		return
+	}
+
+	mailbox := make(map[string][]byte)
+	for _, item := range req.FriendShares {
+		slotID := h.Service.DeriveFriendSlot(req.PublicKey, item.FriendPubKey)
+		mailbox[slotID] = item.EncryptedBlob
 	}
 
 	// Map the received DTO to the model
@@ -75,6 +124,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Default expiration = Now + Threshold
 		// TODO: change if necessary
 		ExpirationDate: time.Now().Add(req.InactivityThreshold),
+		FriendShares:   mailbox,
 	}
 
 	// Save it
@@ -197,4 +247,51 @@ func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 		"status":            "recovery_success",
 		"partial_signature": partialSig,
 	})
+}
+
+func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterParticipantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validation
+	if req.ID == "" || len(req.PublicKey) == 0 {
+		http.Error(w, "ID or PublicKey required", http.StatusBadRequest)
+		return
+	}
+
+	p := &core.Participant{
+		ID:        req.ID,
+		PublicKey: req.PublicKey,
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.Service.SaveParticipant(p); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {
+	idsParam := r.URL.Query().Get("ids")
+	if idsParam == "" {
+		http.Error(w, "Missing 'ids' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	ids := strings.Split(idsParam, ",")
+	// Map ID to PubKey
+	response := make(map[string][]byte)
+
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if p, err := h.Service.GetParticipant(id); err == nil {
+			response[id] = p.PublicKey
+		}
+	}
+
+	json.NewEncoder(w).Encode(response)
 }

@@ -25,10 +25,13 @@ func NewJSONStore(dir string, secret string) *JSONStore {
 	}
 }
 
-// Deterministically derive a Public key into a storage ID
-func (s *JSONStore) deriveID(pubKey []byte) string {
+func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
 	h := hmac.New(sha256.New, s.HMACSecret)
-	h.Write(pubKey)
+
+	// Must bind slot to both wallet and friend otherwise same friends would have same slot in different wallets
+	h.Write(walletPubKey)
+	h.Write(friendPubKey)
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -77,4 +80,46 @@ func (s *JSONStore) save(w *core.Wallet) error {
 	}
 	path := filepath.Join(s.DataDir, w.ID+".json")
 	return os.WriteFile(path, data, 0600)
+}
+
+// Deterministically derive a Public key into a storage ID
+func (s *JSONStore) deriveID(pubKey []byte) string {
+	h := hmac.New(sha256.New, s.HMACSecret)
+	h.Write(pubKey)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Creates a new "registered user"
+func (s *JSONStore) SaveParticipant(p *core.Participant) error {
+	// Create participants dir if it does it exist
+	partDir := filepath.Join(s.DataDir, "participants")
+	if err := os.MkdirAll(partDir, 0755); err != nil {
+		return err
+	}
+
+	path := filepath.Join(partDir, p.ID+".json")
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("participant ID '%s' already taken", p.ID)
+	}
+
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// Retrieves a "registered user"
+func (s *JSONStore) GetParticipant(id string) (*core.Participant, error) {
+	path := filepath.Join(s.DataDir, "participants", id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("participant not found")
+	}
+
+	var p core.Participant
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
