@@ -12,29 +12,11 @@ import (
 	"os"
 	"strings"
 	"threshold-recovery/internal/crypto"
-	"time"
+	"threshold-recovery/internal/api"
 )
 
 // Configuration for the dealer
 const ServerURL = "http://localhost:8080"
-
-type RegisterRequest struct {
-	PublicKey           []byte             `json:"public_key"`
-	EncryptedShare      []byte             `json:"encrypted_share"`
-	ShareCommitment     []byte             `json:"share_commitment"`
-	InactivityThreshold time.Duration      `json:"inactivity_threshold"`
-	FriendShares        []FriendShareInput `json:"friend_shares"`
-}
-
-type RegisterParticipantRequest struct {
-	ID        string `json:"id"`
-	PublicKey []byte `json:"public_key"`
-}
-
-type FriendShareInput struct {
-	FriendPubKey  []byte `json:"friend_public_key"`
-	EncryptedBlob []byte `json:"encrypted_blob"`
-}
 
 // Mock pinning, should we remove it?
 var trustedFingerprints = map[string]string{
@@ -62,7 +44,7 @@ func main() {
 	friendIDs := strings.Split(*friendsList, ",")
 
 	// Validate arguments, I love this
-	if *n == 0 || *k == 0 || *thresholdDur == 0 || *k > *n || *k < 1 || *friendsList == "" || len(*&friendIDs) != *n-1 {
+	if *n == 0 || *k == 0 || *thresholdDur == 0 || *k > *n || *k < 1 || *friendsList == "" || len(friendIDs) != *n-1 {
 		if *k > *n {
 			fmt.Fprintf(os.Stderr, "Error: Threshold (k) cannot be greater than total shares (n).\n\n")
 		} else if *k <= 1 && *k != 0 {
@@ -100,7 +82,7 @@ func main() {
 	commitments := tss.ComputeCommitments(privKey, *k)
 
 	// Encrypt shares for specific friends
-	var friendInputs []FriendShareInput
+	var friendInputs []api.FriendShareInput
 	//Share 0 goes to server, shares 1..n go to friends
 	for i, fID := range friendIDs {
 		// Get the share
@@ -116,7 +98,7 @@ func main() {
 		// This is a mock
 		encryptedBlob := append([]byte("ENC_FOR_"+fID+":"), rawShare.Value...)
 
-		friendInputs = append(friendInputs, FriendShareInput{
+		friendInputs = append(friendInputs, api.FriendShareInput{
 			FriendPubKey:  targetPubKey,
 			EncryptedBlob: encryptedBlob,
 		})
@@ -124,7 +106,7 @@ func main() {
 
 	// Register
 	fmt.Println("\n[4] Uploading to server...")
-	payload := RegisterRequest{
+	payload := api.RegisterRequest{
 		PublicKey:           pubKey,
 		EncryptedShare:      shares[0].Value, // Arbitrarily give share no.1 no server, can we make it random?
 		ShareCommitment:     commitments,
@@ -168,7 +150,7 @@ func fetchFriendKeys(ids []string) (map[string][]byte, error) {
 	return keys, nil
 }
 
-func registerWithServer(req RegisterRequest) error {
+func registerWithServer(req api.RegisterRequest) error {
 	jsonData, err := json.Marshal(req)
 	if err != nil {
 		return err
