@@ -9,6 +9,7 @@ launch-server
 # Ignora tutti i file nelle directory di esecuzione
 /dist_shares/*
 /data/*
+/client_dir/
 
 # Roba di Go
 vendor/
