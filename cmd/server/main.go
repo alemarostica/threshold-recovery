@@ -47,6 +47,9 @@ func main() {
 	log.Printf("Starting Threshold Recovery server on %s", cfg.ServerPort)
 	log.Printf("Data dir: %s", cfg.DataDir)
 
+	certFile := "./certs/server.crt"
+	keyFile := "./certs/server.key"
+
 	// Apparently port should be passed as :port, not port
 	port := cfg.ServerPort
 	if port != "" && port[0] != ':' {
@@ -55,7 +58,7 @@ func main() {
 
 	// TODO: to change with ListenAndServeTLS
 	// As soon as ListenAndServe returns some error we exit and log a fatal error
-	if err := http.ListenAndServe(port, mux); err != nil {
+	if err := http.ListenAndServeTLS(port, certFile, keyFile,  mux); err != nil {
 		log.Fatal(err)
 	}
 }

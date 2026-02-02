@@ -1,33 +1,30 @@
-BINARY_NAME=launch-server
-CLIENT_NAME=recovery-client
-MAIN_PATH=./cmd/server/main.go
+ROOT_DIR=.
+CLIENT_DIR=$(ROOT_DIR)/client_dir
+SERVER_BINARY_NAME=$(ROOT_DIR)/server
+CLIENT_BINARY_NAME=$(CLIENT_DIR)/client
+SERVER_SOURCE=./cmd/server/main.go
+CLIENT_SOURCE=./cmd/client/main.go
 
-.PHONY: all build run clean
+.PHONY: build-all build-server run-server build-client clean
 
-all: build
+build-all: build-server build-client
 
-build:
+build-server:
 	@echo "Building the server..."
-	go build -o $(BINARY_NAME) $(MAIN_PATH)
+	go build -o $(SERVER_BINARY_NAME) $(SERVER_SOURCE)
 
-server:
+run-server:
 	@echo "Starting the server..."
-	go run $(MAIN_PATH)
+	go run $(SERVER_SOURCE)
 
-test-client:
-	@echo "Running simulation client..."
-	go run cmd/client/main.go
-
-dealer:
-	@echo "Running dealer CLI..."
-	go run cmd/dealer/main.go
-
-shareholder:
-	@echo "Running share pickup..."
-	go run cmd/shareholder/main.go
+build-client:
+	@echo "Building the client..."
+	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE)
 
 clean:
 	@echo "Cleaning up..."
-	rm -f $(BINARY_NAME)
+	rm -f $(SERVER_BINARY_NAME)
+	rm -f $(CLIENT_BINARY_NAME)
+	rm -fr $(CLIENT_DIR)
 	## rm -fr ./data/*.json
 	@echo "Done."

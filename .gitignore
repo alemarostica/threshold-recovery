@@ -1,5 +1,5 @@
 # Eseguibili
-launch-server
+server
 *.exe
 *.exe~
 *.dll
@@ -10,6 +10,7 @@ launch-server
 /dist_shares/*
 /data/*
 /client_dir/
+/certs/
 
 # Roba di Go
 vendor/

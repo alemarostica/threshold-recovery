@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,7 +20,7 @@ import (
 
 // Configuration
 const (
-	ServerURL = "http://localhost:8080"
+	ServerURL = "https://localhost:8443"
 	DBFile    = "client_db.json"
 )
 
@@ -95,10 +96,16 @@ func callAPI(method, path string, payload interface{}, out interface{}) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err  := client.Do(req)
+	// TODO: actually check certificates
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: tr,
+	}
+	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("connection failed: %w", err) 
+		return fmt.Errorf("connection failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -153,7 +160,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		name := strings.TrimSpace(cn)
 		keyHex, ok := db.Contacts[name]
 		if !ok {
-			fmt.Printf("Error: Contact '%s' not found.\n")
+			fmt.Printf("Error: Contact '%s' not found.\n", name)
 			return
 		}
 		kb, _ := hex.DecodeString(keyHex)
@@ -161,7 +168,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	}
 
 	if len(friendKeys) != n-1 {
-		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n")
+		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n", n-1)
 		return
 	}
 
@@ -256,17 +263,17 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 	resp, err := http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer([]byte{})) // Placeholder
 	// Using callAPI for simplicity; you might want a specialized "Download" helper for binary data
 	fmt.Println("Contacting server for share...")
-	
-    // Note: Since pickup returns raw bytes, we handle it manually here to preserve the binary share
-    bz, _ := json.Marshal(req)
-    resp, err = http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer(bz))
-    if err != nil || resp.StatusCode != 200 {
-        fmt.Println("Recovery failed. User might still be active.")
-        return
-    }
-    data, _ := io.ReadAll(resp.Body)
-    os.WriteFile("recovered_share.bin", data, 0600)
-    fmt.Println("Success! Share saved to recovered_share.bin")
+
+	// Note: Since pickup returns raw bytes, we handle it manually here to preserve the binary share
+	bz, _ := json.Marshal(req)
+	resp, err = http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer(bz))
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Println("Recovery failed. User might still be active.")
+		return
+	}
+	data, _ := io.ReadAll(resp.Body)
+	os.WriteFile("recovered_share.bin", data, 0600)
+	fmt.Println("Success! Share saved to recovered_share.bin")
 }
 
 func setupIdentity(r *bufio.Reader, db *LocalDB) {
@@ -349,7 +356,6 @@ func addToWatchlist(r *bufio.Reader, db *LocalDB) {
 	saveDB(db)
 	fmt.Println("Wallet added to watchlist.")
 }
-
 
 func listCreatedWallets(db *LocalDB) {
 	fmt.Println("\n--- [WALLETS YOU CREATED] ---")
