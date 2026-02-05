@@ -35,7 +35,7 @@ func main() {
 
 	// Logic and API
 	// struct in internal/api/router.go
-	verifier := &crypto.MockVerifier{}
+	verifier := crypto.NewVerifier()
 	handler := api.NewHandler(fileStore, verifier, *auditLogger)
 
 	// Router

@@ -1,0 +1,1193 @@
+===== FILE: ./internal/config/loader.go =====
+package config
+
+import (
+	"encoding/json"
+	"os"
+)
+
+// Simple struct which holds all the configurations
+type Config struct {
+	ServerPort          string `json:"server_port"`
+	DataDir             string `json:"data_dir"`
+	DefaultTimeoutHours int    `json:"default_timeout_hours"`
+	HMACSecret          string `json:"hmac_secret"`
+}
+
+// This loads the configuration JSON file and parses it into a Config var
+func Load(path string) (*Config, error) {
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	err = json.Unmarshal(file, &cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+===== FILE: ./internal/store/json_store.go =====
+package store
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"threshold-recovery/internal/core"
+	"time"
+)
+
+// The JSONStore is simply a path to a directory
+type JSONStore struct {
+	DataDir    string
+	HMACSecret []byte
+}
+
+func NewJSONStore(dir string, secret string) *JSONStore {
+	return &JSONStore{
+		DataDir:    dir,
+		HMACSecret: []byte(secret),
+	}
+}
+
+func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
+	h := hmac.New(sha256.New, s.HMACSecret)
+
+	// Must bind slot to both wallet and friend otherwise same friends would have same slot in different wallets
+	h.Write(walletPubKey)
+	h.Write(friendPubKey)
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// This take a wallet name and finds the corresponding file on local storage
+func (s *JSONStore) GetWallet(pubKey []byte) (*core.Wallet, error) {
+	id := s.deriveID(pubKey)
+	path := filepath.Join(s.DataDir, id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var w core.Wallet
+	// Funky name for a function that parses JSON, it also appears to use some base64 magic
+	err = json.Unmarshal(data, &w)
+	return &w, err
+}
+
+// Creates a new wallet to local storage
+func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
+	w.ID = s.deriveID(w.PublicKey)
+
+	path := filepath.Join(s.DataDir, w.ID+".json")
+
+	// Check if file exists
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("wallet for this public key already exists")
+	}
+	return s.save(w)
+}
+
+// Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
+func (s *JSONStore) UpdateLiveness(pubKey []byte) error {
+	w, err := s.GetWallet(pubKey)
+	if err != nil {
+		return err
+	}
+	w.LastActivity = time.Now()
+	return s.save(w)
+}
+
+// Private helper to write files
+func (s *JSONStore) save(w *core.Wallet) error {
+	data, err := json.MarshalIndent(w, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(s.DataDir, w.ID+".json")
+	return os.WriteFile(path, data, 0600)
+}
+
+// Deterministically derive a Public key into a storage ID
+func (s *JSONStore) deriveID(pubKey []byte) string {
+	h := hmac.New(sha256.New, s.HMACSecret)
+	h.Write(pubKey)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// Creates a new "registered user"
+func (s *JSONStore) SaveParticipant(p *core.Participant) error {
+	// Create participants dir if it does it exist
+	partDir := filepath.Join(s.DataDir, "participants")
+	if err := os.MkdirAll(partDir, 0755); err != nil {
+		return err
+	}
+
+	path := filepath.Join(partDir, p.ID+".json")
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("participant ID '%s' already taken", p.ID)
+	}
+
+	data, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// Retrieves a "registered user"
+func (s *JSONStore) GetParticipant(id string) (*core.Participant, error) {
+	path := filepath.Join(s.DataDir, "participants", id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("participant not found")
+	}
+
+	var p core.Participant
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+===== FILE: ./internal/crypto/tss.go =====
+// EVERYTHING IN THIS FILE IS A MOCKUP OF THE FUNCTIONALITY TO BE IMPLEMENTED
+package crypto
+
+import (
+	"crypto/rand"
+	// Apparently deprecated
+	// "math/rand"
+	"encoding/hex"
+	"fmt"
+)
+
+// A piece of the secret
+type Share struct {
+	Index int    `json:"index"`
+	Value []byte `json:"value"`
+}
+
+// Provides simulation methods
+type TSS struct{}
+
+func NewTSS() *TSS {
+	return &TSS{}
+}
+
+// Creates a FAKE keypair
+func (t *TSS) GenerateIdentity() (pubKey []byte, privKey []byte) {
+	// Implementation will use secp256k1 or ed25519
+	mockPub := make([]byte, 32)
+	mockPriv := make([]byte, 32)
+	rand.Read(mockPub)
+	rand.Read(mockPriv)
+	return mockPub, mockPriv
+}
+
+// Split with Shamir's Secret Sharing (k of n)
+func (t *TSS) SplitSecret(secret []byte, n, k int) ([]Share, error) {
+	if k > n {
+		return nil, fmt.Errorf("threshold k cannot be larger than participants n")
+	}
+
+	shares := make([]Share, n)
+	for i := range n {
+		// For now, random noise as shares
+		val := make([]byte, len(secret))
+		rand.Read(val)
+
+		shares[i] = Share{
+			Index: i + 1, // Share index starts at 1, not 0
+			Value: val,
+		}
+	}
+	return shares, nil
+}
+
+// VSS public commitments
+// Allow shareholders to verify their share is valid without seeing the secret
+func (t *TSS) ComputeCommitments(secret []byte, k int) []byte {
+	// Elliptic curve points?
+	return fmt.Appendf(nil, "mock_commitment_for_%s", hex.EncodeToString(secret[:4]))
+}
+
+===== FILE: ./internal/crypto/interfaces.go =====
+package crypto
+
+import "errors"
+
+var (
+	ErrInvalidShare = errors.New("share verification failed")
+	ErrInvalidSig   = errors.New("signature verification failed")
+)
+
+// This Verifier describes what the server needs to check before accepting data
+type Verifier interface {
+	// VerifySignature checks if a message was signed by the wallet's private key
+	// Used for liveness check
+	VerifySignature(pubKey []byte, message []byte, signature []byte) bool
+
+	// VerifyShare checks if a VSS share is valid against a commitment
+	// Used during registration to ensure the server isn's storing incorrect stuff
+	VerifyShare(share []byte, commitment []byte) bool
+
+	// Takes server's share and msg to sign
+	// Returns the partial server's signature
+	SignPartial(share []byte, message []byte) ([]byte, error)
+}
+
+// All this is just placeholder stuff
+type MockVerifier struct{}
+
+func (m *MockVerifier) VerifySignature(pubKey, msg, sig []byte) bool {
+	return true
+}
+
+func (m *MockVerifier) VerifyShare(share, commit []byte) bool {
+	return true
+}
+
+func (m* MockVerifier) SignPartial(share, msg []byte) ([]byte, error) {
+	return []byte("mock_partial_signature"), nil
+}
+
+===== FILE: ./internal/core/models.go =====
+package core
+
+import "time"
+
+// This type represents the state of the recovery process
+
+type WalletState string
+
+// Various possible states of the wallet
+const (
+	StateActive   WalletState = "ACTIVE"
+	StateDormant  WalletState = "DORMANT"
+	StateRecovery WalletState = "RECOVERY"
+)
+
+// The user's data
+type Wallet struct {
+	ID string `json:"id"`
+	// Used in verification of liveness signatures
+	PublicKey []byte `json:"public_key"`
+
+	// Access control
+	LastActivity        time.Time     `json:"last_activity"`
+	ExpirationDate      time.Time     `json:"expiration_date"`
+	InactivityThreshold time.Duration `json:"inactivity_threshold"`
+
+	// Cryptography stuff
+	// The server's share, locked unless policy allows access
+	EncryptedShare []byte `json:"encrypted_share"`
+
+	// A sort of "mailbox" for other users
+	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share
+	FriendShares map[string][]byte `json:"friend_shares"`
+}
+
+// Returns whether the wallet is in a recoverable state
+func (w *Wallet) IsRecoverable() bool {
+	// If now > LastActivity + Threshold OR now > ExpirationDate
+	deadline := w.LastActivity.Add(w.InactivityThreshold)
+	return time.Now().After(deadline) || time.Now().After(w.ExpirationDate)
+}
+
+// Kind of like a registered user
+type Participant struct {
+	ID        string    `json:"id"`
+	PublicKey []byte    `json:"public_key"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+===== FILE: ./internal/core/audit.go =====
+package core
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+type AuditEvent string
+
+const (
+	EventStatus            AuditEvent = "STATUS"
+	EventRegister          AuditEvent = "REGISTER"
+	EventLiveness          AuditEvent = "LIVENESS_UPDATE"
+	EventSignAttempt       AuditEvent = "SIGN_ATTEMPT"
+	EventSignSuccess       AuditEvent = "SIGN_SUCCESS"
+	EventSignBlocked       AuditEvent = "SIGN_BLOCKED_ACTIVE"
+	EventSharePickup       AuditEvent = "SHARE_PICKUP"
+	EventSharePickupDenied AuditEvent = "SHARE_PICKUP_DENIED"
+)
+
+// Every security log is appended to a file
+type AuditLogger struct {
+	FilePath string
+}
+
+func NewAuditLogger(path string) *AuditLogger {
+	return &AuditLogger{FilePath: path}
+}
+
+// Basically the function that logs everything
+func (l *AuditLogger) Log(walletID string, event AuditEvent, details string) {
+	entry := fmt.Sprintf("[%s] WALLET:%s EVENT:%s MSG:%s\n",
+		time.Now().Format(time.RFC3339), walletID, event, details)
+
+	// Open in append mode
+	f, err := os.OpenFile(l.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("CRITICAL: Failed to write audit log: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(entry); err != nil {
+		fmt.Printf("CRITICAL: Failed to write entry: %v\n", err)
+	}
+}
+
+===== FILE: ./internal/api/dto.go =====
+package api
+
+import (
+	"time"
+)
+
+// Data Transfer Objects, everything coming from the outside world
+
+type FriendShareInput struct {
+	FriendPubKey  []byte `json:"friend_public_key"`
+	EncryptedBlob []byte `json:"encrypted_blob"`
+}
+
+// The request to register a wallet
+type RegisterRequest struct {
+	PublicKey           []byte             `json:"public_key"`
+	EncryptedShare      []byte             `json:"encrypted_share"`
+	ShareCommitment     []byte             `json:"share_commitment"`
+	InactivityThreshold time.Duration      `json:"inactivity_threshold"`
+	FriendShares        []FriendShareInput `json:"friend_shares"`
+}
+
+type SharePickupRequest struct {
+	PublicKey    []byte `json:"public_key"`
+	FriendPubKey []byte `json:"friend_pub_key"`
+	Signature    []byte `json:"signature"`
+}
+
+// Liveness request is the JSON body for POST /liveness
+type LivenessRequest struct {
+	PublicKey []byte `json:"public_key"`
+	Timestamp int64  `json:"timestamp"` // Should help preventing replay attacks
+	Signature []byte `json:"signature"` // User's proof
+}
+
+// The request to the server to provide a partial signature
+type SignRequest struct {
+	PublicKey []byte `json:"public_key"`
+	Message   string `json:"message"`
+}
+
+type RegisterParticipantRequest struct {
+	ID        string `json:"id"`
+	PublicKey []byte `json:"public_key"`
+}
+
+===== FILE: ./internal/api/router.go =====
+// This is the CONTROLLER, or the handler of HTTP requests
+package api
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"threshold-recovery/internal/core"
+	"threshold-recovery/internal/crypto"
+	"time"
+)
+
+// Define what the backend can do
+// Interface to swap memory more easily
+// Every WalletService var implements the following functions implicitly
+type WalletService interface {
+	GetWallet(pubKey []byte) (*core.Wallet, error)
+	UpdateLiveness(pubKey []byte) error
+	RegisterWallet(w *core.Wallet) error
+	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
+	SaveParticipant(p *core.Participant) error
+	GetParticipant(id string) (*core.Participant, error)
+}
+
+type Handler struct {
+	Service  WalletService
+	Verifier crypto.Verifier
+	Audit    core.AuditLogger
+}
+
+func NewHandler(s WalletService, v crypto.Verifier, a core.AuditLogger) *Handler {
+	return &Handler{
+		Service:  s,
+		Verifier: v,
+		Audit:    a,
+	}
+}
+
+// Register the endpoints
+// Every specific endpoint will execute the specific handler
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /register", h.handleRegister)
+	mux.HandleFunc("POST /liveness", h.handleLiveness)
+	mux.HandleFunc("GET /status/{id}", h.handleStatus)
+	mux.HandleFunc("POST /recover", h.handleSignRecovery)
+	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
+	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
+	mux.HandleFunc("GET /participants", h.handleGetParticipants)
+}
+
+func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
+	var req SharePickupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	// Derive the slot ID from the provided friend's public key
+	slotID := h.Service.DeriveFriendSlot(req.PublicKey, req.FriendPubKey)
+
+	// Gatekeep is the user is not dead
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(wallet.ID, core.EventSharePickupDenied, "Slot "+slotID+" tried to pick up share too early")
+		http.Error(w, "RECOVERY LOCKED: User is still active.", http.StatusForbidden)
+		return
+	}
+
+	// Authentication will have to be here, which kind?
+	shareBlob, ok := wallet.FriendShares[slotID]
+	if !ok {
+		http.Error(w, "No share found for this ID", http.StatusNotFound)
+		return
+	}
+
+	h.Audit.Log(wallet.ID, core.EventSharePickup, "Friend "+slotID+" collected share")
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(shareBlob)
+}
+
+// Returns the status of a specific wallet
+func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
+
+	// Decode the request
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate the input
+	if len(req.PublicKey) == 0 {
+		http.Error(w, "Missing Public Key", http.StatusBadRequest)
+		return
+	}
+
+	// Validate Cryptography
+	if !h.Verifier.VerifyShare(req.EncryptedShare, req.ShareCommitment) {
+		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
+		return
+	}
+
+	mailbox := make(map[string][]byte)
+	for _, item := range req.FriendShares {
+		slotID := h.Service.DeriveFriendSlot(req.PublicKey, item.FriendPubKey)
+		mailbox[slotID] = item.EncryptedBlob
+	}
+
+	// Map the received DTO to the model
+	wallet := &core.Wallet{
+		PublicKey:           req.PublicKey,
+		EncryptedShare:      req.EncryptedShare,
+		LastActivity:        time.Now(),
+		InactivityThreshold: req.InactivityThreshold,
+		// Default expiration = Now + Threshold
+		// TODO: change if necessary
+		ExpirationDate: time.Now().Add(req.InactivityThreshold),
+		FriendShares:   mailbox,
+	}
+
+	// Save it
+	if err := h.Service.RegisterWallet(wallet); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	h.Audit.Log(pubKeyHex, core.EventRegister, "Success")
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(`{"status":"registered"}`))
+}
+
+func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
+	// Decode the request
+	var req LivenessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Let's try to prevent replay attacks
+	requestTime := time.Unix(req.Timestamp, 0)
+	if time.Since(requestTime).Abs() > 5*time.Minute {
+		http.Error(w, "Invalid timestamp", http.StatusUnauthorized)
+		return
+	}
+
+	// Retrieve the wallet
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify the signature
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
+
+	if !h.Verifier.VerifySignature(wallet.PublicKey, []byte(msg), req.Signature) {
+		h.Audit.Log(pubKeyHex, core.EventLiveness, "Invalid Signature")
+		http.Error(w, "Invalid Signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Update Liveness
+	if err := h.Service.UpdateLiveness(req.PublicKey); err != nil {
+		http.Error(w, "Failed to update liveness", http.StatusInternalServerError)
+		return
+	}
+
+	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"liveness_updated"}`))
+}
+
+func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.PathValue("id")
+	pubKey, err := hex.DecodeString(pubKeyHex)
+	if err != nil {
+		http.Error(w, "Invalid Public Key Hex", http.StatusBadRequest)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(pubKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]interface{}{
+		"recoverable":         wallet.IsRecoverable(),
+		"last_activity":       wallet.LastActivity,
+		"time_until_recovery": time.Until(wallet.LastActivity.Add(wallet.InactivityThreshold)).String(),
+	}
+
+	h.Audit.Log(pubKeyHex, core.EventStatus, "")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
+	var req SignRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Recover wallet
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+
+	// Verify if user is dead
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(pubKeyHex, core.EventSignBlocked, "Somebody tried to recover wallet while user is still alive!")
+		http.Error(w, "RECOVERY LOCKED", http.StatusForbidden)
+		return
+	}
+
+	// Here dead-man switch must have triggered
+	// Server accepts using its share
+
+	partialSig, err := h.Verifier.SignPartial(wallet.EncryptedShare, []byte(req.Message))
+	if err != nil {
+		h.Audit.Log(wallet.ID, core.EventSignAttempt, "")
+		http.Error(w, "Signing failed", http.StatusInternalServerError)
+		return
+	}
+
+	h.Audit.Log(wallet.ID, core.EventSignSuccess, "")
+	// Answer with partial signature
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":            "recovery_success",
+		"partial_signature": partialSig,
+	})
+}
+
+func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterParticipantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validation
+	if req.ID == "" || len(req.PublicKey) == 0 {
+		http.Error(w, "ID or PublicKey required", http.StatusBadRequest)
+		return
+	}
+
+	p := &core.Participant{
+		ID:        req.ID,
+		PublicKey: req.PublicKey,
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.Service.SaveParticipant(p); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {
+	idsParam := r.URL.Query().Get("ids")
+	if idsParam == "" {
+		http.Error(w, "Missing 'ids' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	ids := strings.Split(idsParam, ",")
+	// Map ID to PubKey
+	response := make(map[string][]byte)
+
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if p, err := h.Service.GetParticipant(id); err == nil {
+			response[id] = p.PublicKey
+		}
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+===== FILE: ./cmd/client/main.go =====
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"threshold-recovery/internal/api"
+	"threshold-recovery/internal/crypto"
+	"time"
+)
+
+// Configuration
+const (
+	ServerURL = "https://localhost:8443"
+	DBFile    = "client_db.json"
+)
+
+// Local storage models
+type LocalDB struct {
+	MyIdentity *Identity         `json:"my_identity"`
+	Contacts   map[string]string `json:"contacts"`
+	WatchList  map[string]string `json:"watchlist"`
+	MyWallets  map[string]string `json:"my_wallets"`
+}
+
+type Identity struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
+// Main
+func main() {
+	db := loadDB()
+	reader := bufio.NewReader(os.Stdin)
+
+	// First run
+	if db.MyIdentity == nil {
+		setupIdentity(reader, db)
+	}
+
+	// Loop
+	for {
+		printMenu(db)
+		fmt.Print("\nSelect an option: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		switch input {
+		case "1":
+			showIdentity(db)
+		case "2":
+			addContact(reader, db)
+		case "3":
+			createWallet(reader, db)
+		case "4":
+			addToWatchlist(reader, db)
+		case "5":
+			checkWallets(db)
+		case "6":
+			recoverShare(reader, db)
+		case "7":
+			listCreatedWallets(db)
+		case "0":
+			fmt.Println("Goodbye.")
+			return
+		default:
+			fmt.Println("Invalid Option.")
+		}
+		fmt.Println("\nPress Enter to continue...")
+		reader.ReadString('\n')
+	}
+}
+
+func callAPI(method, path string, payload interface{}, out interface{}) error {
+	var body io.Reader
+	if payload != nil {
+		bz, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal error: %w", err)
+		}
+		body = bytes.NewBuffer(bz)
+	}
+
+	req, err := http.NewRequest(method, ServerURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// TODO: actually check certificates
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: tr,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		errMsg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(errMsg))
+	}
+
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
+
+func createWallet(r *bufio.Reader, db *LocalDB) {
+	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
+
+	if len(db.Contacts) == 0 {
+		fmt.Println("Error: You have no contacts. Add shareholders first.")
+		return
+	}
+
+	// Get n and k
+	fmt.Print("Enter total number of shares (n): ")
+	n, err := strconv.Atoi(readInput(r))
+	if err != nil {
+		fmt.Println("Error: n must be a number >= 2.")
+		return
+	}
+
+	fmt.Print("Enter threshold (k): ")
+	k, err := strconv.Atoi(readInput(r))
+	if err != nil || k < 2 || k > n {
+		fmt.Printf("Error: k must be between 2 and %d\n", n)
+		return
+	}
+
+	// Select friends
+	fmt.Println("\nYour contacts:")
+	var names []string
+	for name := range db.Contacts {
+		names = append(names, name)
+		fmt.Printf("- %s\n", name)
+	}
+
+	fmt.Printf("Enter %d friend names, comma separated: ", n-1)
+	chosenStr := readInput(r)
+	chosenNames := strings.Split(chosenStr, ",")
+
+	var friendKeys [][]byte
+	for _, cn := range chosenNames {
+		name := strings.TrimSpace(cn)
+		keyHex, ok := db.Contacts[name]
+		if !ok {
+			fmt.Printf("Error: Contact '%s' not found.\n", name)
+			return
+		}
+		kb, _ := hex.DecodeString(keyHex)
+		friendKeys = append(friendKeys, kb)
+	}
+
+	if len(friendKeys) != n-1 {
+		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n", n-1)
+		return
+	}
+
+	// Timeout
+	fmt.Print("Enter inactivity timeout (e.g. 30s, 24h, 720h): ")
+	timeoutDur, err := time.ParseDuration(readInput(r))
+	if err != nil {
+		fmt.Println("Error: Invalid duration format. Use 's', 'm' or 'h'.")
+		return
+	}
+
+	fmt.Print("Give this wallet a local nickname: ")
+	walletName := readInput(r)
+
+	// Cryptography
+	tss := crypto.NewTSS()
+	walletPub, privKey := tss.GenerateIdentity()
+	shares, err := tss.SplitSecret(privKey, n, k)
+	if err != nil {
+		fmt.Printf("Crypto error: %v\n", err)
+		return
+	}
+	commitments := tss.ComputeCommitments(privKey, k)
+
+	// Build payload
+
+	var friendInputs []api.FriendShareInput
+	for i, fKey := range friendKeys {
+		// Mock encryption
+		encBlob := append([]byte("ENC_FOR_FRIEND:"), shares[i+1].Value...)
+		friendInputs = append(friendInputs, api.FriendShareInput{
+			FriendPubKey:  fKey,
+			EncryptedBlob: encBlob,
+		})
+	}
+
+	// Mock encrypting logic
+	req := api.RegisterRequest{
+		PublicKey:           walletPub,
+		EncryptedShare:      shares[0].Value,
+		ShareCommitment:     commitments,
+		InactivityThreshold: timeoutDur,
+		FriendShares:        friendInputs,
+	}
+
+	if err := sendRequest("POST", "/register", req, nil); err != nil {
+		fmt.Printf("Server registration failed: %v\n", err)
+		return
+	}
+
+	wHex := hex.EncodeToString(walletPub)
+	db.MyWallets[wHex] = walletName
+	saveDB(db)
+
+	fmt.Println("SUCCESS: Wallet registered!")
+	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
+	fmt.Println("IMPORTANT: Give this hex key to your shareholders so they can watch it.")
+}
+
+func checkWallets(db *LocalDB) {
+	fmt.Println("\n--- Watchlist status ---")
+	for name, keyHex := range db.WatchList {
+		var status map[string]interface{}
+		if err := callAPI("GET", "/status/"+keyHex, nil, &status); err != nil {
+			fmt.Printf("%s: [Error]\n", name)
+			continue
+		}
+
+		state := "ACTIVE"
+		if status["recoverable"].(bool) {
+			state = "DEAD (RECOVERABLE)"
+		}
+
+		fmt.Printf("%-15s | %s | Time left: %s\n", name, state, status["time_until_recovery"])
+	}
+}
+
+func recoverShare(r *bufio.Reader, db *LocalDB) {
+	fmt.Println("\n--- Recover share ---")
+	// Simplified selection logic for brevity
+	fmt.Print("Enter Wallet PubKey (Hex) to recover from: ")
+	targetHex := readInput(r)
+	targetKey, _ := hex.DecodeString(targetHex)
+	myKey, _ := hex.DecodeString(db.MyIdentity.PublicKey)
+
+	req := api.SharePickupRequest{
+		PublicKey:    targetKey,
+		FriendPubKey: myKey,
+	}
+
+	// For downloading raw bytes, we use a slight variation of the API helper or custom logic
+	resp, err := http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer([]byte{})) // Placeholder
+	// Using callAPI for simplicity; you might want a specialized "Download" helper for binary data
+	fmt.Println("Contacting server for share...")
+
+	// Note: Since pickup returns raw bytes, we handle it manually here to preserve the binary share
+	bz, _ := json.Marshal(req)
+	resp, err = http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer(bz))
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Println("Recovery failed. User might still be active.")
+		return
+	}
+	data, _ := io.ReadAll(resp.Body)
+	os.WriteFile("recovered_share.bin", data, 0600)
+	fmt.Println("Success! Share saved to recovered_share.bin")
+}
+
+func setupIdentity(r *bufio.Reader, db *LocalDB) {
+	fmt.Print("Choose username: ")
+	name := readInput(r)
+	pk := make([]byte, 32) // Mock
+	rand.Read(pk)
+	db.MyIdentity = &Identity{Name: name, PublicKey: hex.EncodeToString(pk)}
+	saveDB(db)
+
+	req := api.RegisterParticipantRequest{ID: name, PublicKey: pk}
+	if err := callAPI("POST", "/participants", req, nil); err != nil {
+		fmt.Println("Server registration failed, but identity saved locally.")
+	}
+}
+
+// Helpers
+func loadDB() *LocalDB {
+	db := &LocalDB{
+		Contacts:  make(map[string]string),
+		WatchList: make(map[string]string),
+		MyWallets: make(map[string]string),
+	}
+	data, err := os.ReadFile(DBFile)
+	if err == nil {
+		json.Unmarshal(data, db)
+	}
+	// Check if file existed but lacked map
+	if db.MyWallets == nil {
+		db.MyWallets = make(map[string]string)
+	}
+	return db
+}
+
+// Menu functions
+func printMenu(db *LocalDB) {
+	fmt.Print("\033[H\033[2J")
+	fmt.Println("==================================================================")
+	fmt.Printf(" USER: %s | CONTACTS: %d | WATCHING: %d | CREATED: %d\n",
+		db.MyIdentity.Name, len(db.Contacts), len(db.WatchList), len(db.MyWallets))
+	fmt.Println("==================================================================")
+	fmt.Println(" 1. Show My Identity (for Dealer)    5. Check Watchlist Status")
+	fmt.Println(" 2. Add a Contact                    6. Recover / Download Share")
+	fmt.Println(" 3. Create New Wallet (Dealer)       7. List My Created Wallets")
+	fmt.Println(" 4. Watch an Existing Wallet         0. Exit")
+	fmt.Println("==================================================================")
+}
+
+func showIdentity(db *LocalDB) {
+	fmt.Println("\n--- Identity ---")
+	fmt.Printf("Username:   %s\n", db.MyIdentity.Name)
+	fmt.Printf("Public Key: %s\n", db.MyIdentity.PublicKey)
+	fmt.Println("\n(Send this public key to shareholder so they can add you")
+}
+
+func addContact(r *bufio.Reader, db *LocalDB) {
+	fmt.Print("Friend's name: ")
+	name, _ := r.ReadString('\n')
+	name = strings.TrimSpace(name)
+
+	fmt.Print("Friend's public key (Hex): ")
+	key, _ := r.ReadString('\n')
+	key = strings.TrimSpace(key)
+
+	db.Contacts[name] = key
+	saveDB(db)
+	fmt.Println("Contact saved.")
+}
+
+func addToWatchlist(r *bufio.Reader, db *LocalDB) {
+	fmt.Print("Wallet name (e.g. 'Alice Main'): ")
+	name, _ := r.ReadString('\n')
+	name = strings.TrimSpace(name)
+
+	fmt.Print("Wallet public key (Hex): ")
+	key, _ := r.ReadString('\n')
+	key = strings.TrimSpace(key)
+
+	db.WatchList[name] = key
+	saveDB(db)
+	fmt.Println("Wallet added to watchlist.")
+}
+
+func listCreatedWallets(db *LocalDB) {
+	fmt.Println("\n--- [WALLETS YOU CREATED] ---")
+	if len(db.MyWallets) == 0 {
+		fmt.Println("No wallets created yet.")
+		return
+	}
+	for pubHex, name := range db.MyWallets {
+		fmt.Printf("NAME: %-15s | PUBKEY: %s\n", name, pubHex)
+	}
+}
+
+func sendRequest(method, path string, payload interface{}, result interface{}) error {
+	var body io.Reader
+	if payload != nil {
+		bz, _ := json.Marshal(payload)
+		body = bytes.NewBuffer(bz)
+	}
+
+	req, err := http.NewRequest(method, ServerURL+path, body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("network error (is the server running?): %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	if result != nil {
+		return json.NewDecoder(resp.Body).Decode(result)
+	}
+	return nil
+}
+
+func readInput(r *bufio.Reader) string {
+	input, _ := r.ReadString('\n')
+	return strings.TrimSpace(input)
+}
+
+func saveDB(db *LocalDB) {
+	data, _ := json.MarshalIndent(db, "", "  ")
+	os.WriteFile(DBFile, data, 0600)
+}
+
+func registerIdentity(id *Identity) {
+	keyBytes, _ := hex.DecodeString(id.PublicKey)
+	req := api.RegisterParticipantRequest{
+		ID:        id.Name,
+		PublicKey: keyBytes,
+	}
+	jsonData, _ := json.Marshal(req)
+	http.Post(ServerURL+"/participants", "application/json", bytes.NewBuffer(jsonData))
+}
+
+===== FILE: ./cmd/server/main.go =====
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"threshold-recovery/internal/api"
+	"threshold-recovery/internal/config"
+	"threshold-recovery/internal/core"
+	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/store"
+)
+
+func main() {
+	// Load config
+	// Config is a struct in internal/config/loader.go
+	cfg, err := config.Load("./config/config.json")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Try to create the dir if it doesn't exist
+	// Do nothing if it exists
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		log.Fatal(err)
+	}
+
+	// Simple JSON storage, struct in internal/store/json_store.go
+	// Will it be good enough?
+	fileStore := store.NewJSONStore(cfg.DataDir, cfg.HMACSecret)
+
+	// Setup audit Logger
+	auditLogger := core.NewAuditLogger(filepath.Join(cfg.DataDir, "audit.log"))
+
+	// Logic and API
+	// struct in internal/api/router.go
+	verifier := &crypto.MockVerifier{}
+	handler := api.NewHandler(fileStore, verifier, *auditLogger)
+
+	// Router
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	// Start the actual server
+	// Some logging
+	log.Printf("Starting Threshold Recovery server on %s", cfg.ServerPort)
+	log.Printf("Data dir: %s", cfg.DataDir)
+
+	certFile := "./certs/server.crt"
+	keyFile := "./certs/server.key"
+
+	// Apparently port should be passed as :port, not port
+	port := cfg.ServerPort
+	if port != "" && port[0] != ':' {
+		port = ":" + port
+	}
+
+	// TODO: to change with ListenAndServeTLS
+	// As soon as ListenAndServe returns some error we exit and log a fatal error
+	if err := http.ListenAndServeTLS(port, certFile, keyFile,  mux); err != nil {
+		log.Fatal(err)
+	}
+}
+

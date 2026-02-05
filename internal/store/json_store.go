@@ -69,6 +69,7 @@ func (s *JSONStore) UpdateLiveness(pubKey []byte) error {
 		return err
 	}
 	w.LastActivity = time.Now()
+	w.ExpirationDate = time.Now().Add(w.InactivityThreshold)
 	return s.save(w)
 }
 

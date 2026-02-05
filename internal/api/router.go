@@ -104,7 +104,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate Cryptography
-	if !h.Verifier.VerifyShare(req.EncryptedShare, req.ShareCommitment) {
+	if !h.Verifier.VerifyShare(req.EncryptedShare, req.ShareCommitment, 1) {
 		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
 		return
 	}
