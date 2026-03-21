@@ -94,29 +94,42 @@ func callAPI(method, path string, payload interface{}, out interface{}) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
 
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	
 	// TODO: actually check certificates
-	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	tr := &http.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true,
+	}}
 
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout:   10 * time.Second,
 		Transport: tr,
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("connection failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
 		errMsg, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(errMsg))
 	}
 
 	if out != nil {
+		if w, ok := out.(io.Writer); ok {
+			defer resp.Body.Close()
+			_, err := io.Copy(w, resp.Body)
+			return err
+		}
+		defer resp.Body.Close()
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
+
+	resp.Body.Close()
 	return nil
 }
 
@@ -214,7 +227,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		FriendShares:        friendInputs,
 	}
 
-	if err := sendRequest("POST", "/register", req, nil); err != nil {
+	if err := callAPI("POST", "/register", req, nil); err != nil {
 		fmt.Printf("Server registration failed: %v\n", err)
 		return
 	}
@@ -259,20 +272,19 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 		FriendPubKey: myKey,
 	}
 
-	// For downloading raw bytes, we use a slight variation of the API helper or custom logic
-	resp, err := http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer([]byte{})) // Placeholder
-	// Using callAPI for simplicity; you might want a specialized "Download" helper for binary data
-	fmt.Println("Contacting server for share...")
-
-	// Note: Since pickup returns raw bytes, we handle it manually here to preserve the binary share
-	bz, _ := json.Marshal(req)
-	resp, err = http.Post(ServerURL+"/mailbox/pickup", "application/json", bytes.NewBuffer(bz))
-	if err != nil || resp.StatusCode != 200 {
-		fmt.Println("Recovery failed. User might still be active.")
+	var binBuffer bytes.Buffer
+	if err := callAPI("POST", "/mailbox/pickup", req, &binBuffer); err != nil {
+		fmt.Printf("Pickup failed: %v\n", err)
 		return
 	}
-	data, _ := io.ReadAll(resp.Body)
-	os.WriteFile("recovered_share.bin", data, 0600)
+	
+	data := binBuffer.Bytes()
+	err := os.WriteFile("recovered_share.bin", data, 0600)
+	if err != nil {
+		fmt.Println("File error: %v\n", err)
+		return
+	}
+	
 	fmt.Println("Success! Share saved to recovered_share.bin")
 }
 
@@ -368,37 +380,6 @@ func listCreatedWallets(db *LocalDB) {
 	}
 }
 
-func sendRequest(method, path string, payload interface{}, result interface{}) error {
-	var body io.Reader
-	if payload != nil {
-		bz, _ := json.Marshal(payload)
-		body = bytes.NewBuffer(bz)
-	}
-
-	req, err := http.NewRequest(method, ServerURL+path, body)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("network error (is the server running?): %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	if result != nil {
-		return json.NewDecoder(resp.Body).Decode(result)
-	}
-	return nil
-}
-
 func readInput(r *bufio.Reader) string {
 	input, _ := r.ReadString('\n')
 	return strings.TrimSpace(input)
@@ -407,14 +388,4 @@ func readInput(r *bufio.Reader) string {
 func saveDB(db *LocalDB) {
 	data, _ := json.MarshalIndent(db, "", "  ")
 	os.WriteFile(DBFile, data, 0600)
-}
-
-func registerIdentity(id *Identity) {
-	keyBytes, _ := hex.DecodeString(id.PublicKey)
-	req := api.RegisterParticipantRequest{
-		ID:        id.Name,
-		PublicKey: keyBytes,
-	}
-	jsonData, _ := json.Marshal(req)
-	http.Post(ServerURL+"/participants", "application/json", bytes.NewBuffer(jsonData))
 }

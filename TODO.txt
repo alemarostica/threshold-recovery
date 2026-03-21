@@ -1,0 +1,9 @@
+- Gestire sync di account locale con remoto
+  - Unique identifier è il nome o la public key? Forse la pubkey così si possono fare account con lo stesso nome
+- TSS
+  - 3 state fucking handshake orchestrato dal server
+  - How about x message queues per ognuna delle fasi del TSS?x
+- VSS
+- Check se la roba con HMAC è fatta bene o ho fatto una porcata
+- Mutual TLS o solo del server?
+- Assumo che i certificati vadano bene self signed, altrimenti?
