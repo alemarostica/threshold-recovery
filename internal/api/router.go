@@ -57,14 +57,16 @@ func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wallet, err := h.Service.GetWallet(req.PublicKey)
+	// fmt.Printf("req.WalletID: %v\n", req.PubKey)
+
+	wallet, err := h.Service.GetWallet(req.PubKey)
 	if err != nil {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
 	}
 
 	// Derive the slot ID from the provided friend's public key
-	slotID := h.Service.DeriveFriendSlot(req.PublicKey, req.FriendPubKey)
+	slotID := h.Service.DeriveFriendSlot([]byte(wallet.PublicKey), req.FriendPubKey)
 
 	// Gatekeep is the user is not dead
 	if !wallet.IsRecoverable() {
@@ -82,8 +84,12 @@ func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
 
 	h.Audit.Log(wallet.ID, core.EventSharePickup, "Friend "+slotID+" collected share")
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(shareBlob)
+	resp := SharePickupResponse{
+		ShareBlob: shareBlob,
+		Comms: wallet.Commitments,
+	}
+
+	json.NewEncoder(w).Encode(resp)
 }
 
 // Returns the status of a specific wallet
@@ -102,9 +108,9 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing Public Key", http.StatusBadRequest)
 		return
 	}
-
+	
 	// Validate Cryptography
-	if !h.Verifier.VerifyShare(req.EncryptedShare, req.ShareCommitment) {
+	if !h.Verifier.VerifyShare(req.ServerShare, req.Commitments) {
 		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
 		return
 	}
@@ -118,7 +124,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Map the received DTO to the model
 	wallet := &core.Wallet{
 		PublicKey:           req.PublicKey,
-		EncryptedShare:      req.EncryptedShare,
+		ServerShare:         req.ServerShare,
+		Commitments:         req.Commitments,
 		LastActivity:        time.Now(),
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold
@@ -233,7 +240,7 @@ func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 	// Here dead-man switch must have triggered
 	// Server accepts using its share
 
-	partialSig, err := h.Verifier.SignPartial(wallet.EncryptedShare, []byte(req.Message))
+	partialSig, err := h.Verifier.SignPartial(wallet.ServerShare, []byte(req.Message))
 	if err != nil {
 		h.Audit.Log(wallet.ID, core.EventSignAttempt, "")
 		http.Error(w, "Signing failed", http.StatusInternalServerError)

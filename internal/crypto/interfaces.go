@@ -15,24 +15,9 @@ type Verifier interface {
 
 	// VerifyShare checks if a VSS share is valid against a commitment
 	// Used during registration to ensure the server isn's storing incorrect stuff
-	VerifyShare(share []byte, commitment []byte) bool
+	VerifyShare(share Share, commitment []Commitment) bool
 
 	// Takes server's share and msg to sign
 	// Returns the partial server's signature
-	SignPartial(share []byte, message []byte) ([]byte, error)
-}
-
-// All this is just placeholder stuff
-type MockVerifier struct{}
-
-func (m *MockVerifier) VerifySignature(pubKey, msg, sig []byte) bool {
-	return true
-}
-
-func (m *MockVerifier) VerifyShare(share, commit []byte) bool {
-	return true
-}
-
-func (m* MockVerifier) SignPartial(share, msg []byte) ([]byte, error) {
-	return []byte("mock_partial_signature"), nil
+	SignPartial(share Share, message []byte) ([]byte, error)
 }

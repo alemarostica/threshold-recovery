@@ -1,6 +1,7 @@
 package api
 
 import (
+	"threshold-recovery/internal/crypto"
 	"time"
 )
 
@@ -13,17 +14,25 @@ type FriendShareInput struct {
 
 // The request to register a wallet
 type RegisterRequest struct {
-	PublicKey           []byte             `json:"public_key"`
-	EncryptedShare      []byte             `json:"encrypted_share"`
-	ShareCommitment     []byte             `json:"share_commitment"`
-	InactivityThreshold time.Duration      `json:"inactivity_threshold"`
-	FriendShares        []FriendShareInput `json:"friend_shares"`
+	PublicKey           []byte              `json:"public_key"`
+	ServerShare         crypto.Share        `json:"server_share"`
+	Commitments         []crypto.Commitment `json:"commitments"`
+	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
+	FriendShares        []FriendShareInput  `json:"friend_shares"`
 }
 
 type SharePickupRequest struct {
-	PublicKey    []byte `json:"public_key"`
-	FriendPubKey []byte `json:"friend_pub_key"`
-	Signature    []byte `json:"signature"`
+	PubKey       []byte `json:"public_key"`
+	FriendPubKey []byte `json:"friend_public_key"`
+
+	// let's add some security
+	Timestamp int64  `json:"timestamp"`
+	Signature []byte `json:"signature"`
+}
+
+type SharePickupResponse struct {
+	ShareBlob []byte              `json:"share_blob"`
+	Comms     []crypto.Commitment `json:"commitments"`
 }
 
 // Liveness request is the JSON body for POST /liveness
@@ -36,7 +45,7 @@ type LivenessRequest struct {
 // The request to the server to provide a partial signature
 type SignRequest struct {
 	PublicKey []byte `json:"public_key"`
-	Message   string `json:"message"`
+	Message   []byte `json:"message"`
 }
 
 type RegisterParticipantRequest struct {

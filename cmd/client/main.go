@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -98,7 +99,7 @@ func callAPI(method, path string, payload interface{}, out interface{}) error {
 	if method == "POST" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	
+
 	// TODO: actually check certificates
 	tr := &http.Transport{TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true,
@@ -196,35 +197,53 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Print("Give this wallet a local nickname: ")
 	walletName := readInput(r)
 
-	// Cryptography
-	tss := crypto.NewTSS()
-	walletPub, privKey := tss.GenerateIdentity()
-	shares, err := tss.SplitSecret(privKey, n, k)
+	// Initialize the curve context
+	ctx := crypto.NewCurveCtx()
+	// fmt.Printf("context: %v\n", ctx)
+
+	// Generate the master secret (privKey)
+	// In a real wallet this should be derived from a seed phrase
+	// TODO: Should this actually be inputted by the user?
+	privKey, _ := rand.Int(rand.Reader, ctx.N)
+	pubKeyX, pubKeyY := ctx.Curve.ScalarBaseMult(privKey.Bytes())
+	pubKeyBytes := elliptic.Marshal(ctx.Curve, pubKeyX, pubKeyY)
+
+	shares, commitments, err := crypto.SplitVSS(ctx, privKey.Bytes(), n, k)
 	if err != nil {
-		fmt.Printf("Crypto error: %v\n", err)
+		fmt.Printf("Failed to split secret: %v", err)
 		return
 	}
-	commitments := tss.ComputeCommitments(privKey, k)
 
-	// Build payload
+	serverShare := shares[0]
+	friendSharesRaw := shares[1:]
 
-	var friendInputs []api.FriendShareInput
-	for i, fKey := range friendKeys {
-		// Mock encryption
-		encBlob := append([]byte("ENC_FOR_FRIEND:"), shares[i+1].Value...)
-		friendInputs = append(friendInputs, api.FriendShareInput{
-			FriendPubKey:  fKey,
-			EncryptedBlob: encBlob,
+	// Encrypt and package friend shares
+	var mailbox []api.FriendShareInput
+	for i, s := range friendSharesRaw {
+		// Will need a way to identify which friend gets which share
+		// For now we simulate with a dummy FriendPubKey
+		friendKey := friendKeys[i]
+
+		shareBlob, err := crypto.MarshalShare(s)
+		if err != nil {
+			fmt.Printf("Failed to marshal friend share %d: %v", i, err)
+			return
+		}
+
+		// for now, send raw, later will encrypt
+		mailbox = append(mailbox, api.FriendShareInput{
+			FriendPubKey:  friendKey,
+			EncryptedBlob: shareBlob,
 		})
 	}
 
 	// Mock encrypting logic
 	req := api.RegisterRequest{
-		PublicKey:           walletPub,
-		EncryptedShare:      shares[0].Value,
-		ShareCommitment:     commitments,
+		PublicKey:           pubKeyBytes,
+		ServerShare:         serverShare,
+		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
-		FriendShares:        friendInputs,
+		FriendShares:        mailbox,
 	}
 
 	if err := callAPI("POST", "/register", req, nil); err != nil {
@@ -232,7 +251,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
-	wHex := hex.EncodeToString(walletPub)
+	wHex := hex.EncodeToString(pubKeyBytes)
 	db.MyWallets[wHex] = walletName
 	saveDB(db)
 
@@ -265,10 +284,11 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 	fmt.Print("Enter Wallet PubKey (Hex) to recover from: ")
 	targetHex := readInput(r)
 	targetKey, _ := hex.DecodeString(targetHex)
+	// fmt.Printf("targetHex: %v\n", targetHex)
 	myKey, _ := hex.DecodeString(db.MyIdentity.PublicKey)
 
 	req := api.SharePickupRequest{
-		PublicKey:    targetKey,
+		PubKey:       targetKey,
 		FriendPubKey: myKey,
 	}
 
@@ -277,14 +297,14 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 		fmt.Printf("Pickup failed: %v\n", err)
 		return
 	}
-	
+
 	data := binBuffer.Bytes()
 	err := os.WriteFile("recovered_share.bin", data, 0600)
 	if err != nil {
 		fmt.Println("File error: %v\n", err)
 		return
 	}
-	
+
 	fmt.Println("Success! Share saved to recovered_share.bin")
 }
 

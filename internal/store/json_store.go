@@ -1,3 +1,7 @@
+// Technically, there could be some race conditions when editing data about files
+// Realistically this will not happen since this is a demo
+// Do we care?
+
 package store
 
 import (
@@ -37,7 +41,9 @@ func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
 
 // This take a wallet name and finds the corresponding file on local storage
 func (s *JSONStore) GetWallet(pubKey []byte) (*core.Wallet, error) {
+	// fmt.Printf("[GetWallet] pubkey: %v\n", pubKey)
 	id := s.deriveID(pubKey)
+	// fmt.Printf("[GetWallet] id (derived): %v\n", id)
 	path := filepath.Join(s.DataDir, id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {

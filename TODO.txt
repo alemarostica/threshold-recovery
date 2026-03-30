@@ -7,3 +7,9 @@
 - Check se la roba con HMAC è fatta bene o ho fatto una porcata
 - Mutual TLS o solo del server?
 - Assumo che i certificati vadano bene self signed, altrimenti?
+- Mutex nel json_store?
+- cambiare status per dire solo recoverable o meno?
+- verificare il requester prima che la mailbox restituisca
+- gestiamo replay sulla liveness?
+- Ma se le public key dei destinatari fossero in clear?
+  + Non bisogna aspettare che sia il client a checkare 

@@ -28,3 +28,7 @@ go.sum
 # Prego che nessuno tocchi questo progetto con Mac
 .DS_Store
 Thumbs.db
+
+# Altra roba
+test.txt
+cat-files.sh
