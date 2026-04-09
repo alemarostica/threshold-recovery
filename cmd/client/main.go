@@ -16,6 +16,7 @@ import (
 	"strings"
 	"threshold-recovery/internal/api"
 	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/keyexchange"
 	"time"
 )
 
@@ -34,8 +35,41 @@ type LocalDB struct {
 }
 
 type Identity struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"public_key"`
+	Name       string `json:"name"`
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
+type ClientSender struct{}
+
+func (cs *ClientSender) Send(msg keyexchange.Message) error {
+	err := callAPI("POST", "/relay/send", msg, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send relay message: %v", err)
+	}
+	return nil
+}
+
+type ClientDirectory struct {
+	DB *LocalDB
+}
+
+func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
+	if userID == cd.DB.MyIdentity.Name {
+		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
+	}
+
+	hexKey, exists := cd.DB.Contacts[userID]
+	if !exists {
+		return nil, fmt.Errorf("user %s not found in local contacts", userID)
+	}
+
+	return hex.DecodeString(hexKey)
+}
+
+// TODO: this is a demo
+func (cd *ClientDirectory) GetEpoch() uint64 {
+	return 1
 }
 
 // Main
@@ -311,12 +345,19 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 func setupIdentity(r *bufio.Reader, db *LocalDB) {
 	fmt.Print("Choose username: ")
 	name := readInput(r)
-	pk := make([]byte, 32) // Mock
-	rand.Read(pk)
-	db.MyIdentity = &Identity{Name: name, PublicKey: hex.EncodeToString(pk)}
+
+	ctx := crypto.NewCurveCtx()
+	priv, x, y, _ := elliptic.GenerateKey(ctx.Curve, rand.Reader)
+	pubBytes := elliptic.Marshal(ctx.Curve, x, y)
+
+	db.MyIdentity = &Identity{
+		Name: name,
+		PublicKey: hex.EncodeToString(pubBytes),
+		PrivateKey: hex.EncodeToString(priv),
+	}
 	saveDB(db)
 
-	req := api.RegisterParticipantRequest{ID: name, PublicKey: pk}
+	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubBytes}
 	if err := callAPI("POST", "/participants", req, nil); err != nil {
 		fmt.Println("Server registration failed, but identity saved locally.")
 	}

@@ -58,7 +58,7 @@ func main() {
 
 	// TODO: to change with ListenAndServeTLS
 	// As soon as ListenAndServe returns some error we exit and log a fatal error
-	if err := http.ListenAndServeTLS(port, certFile, keyFile,  mux); err != nil {
+	if err := http.ListenAndServeTLS(port, certFile, keyFile, mux); err != nil {
 		log.Fatal(err)
 	}
 }

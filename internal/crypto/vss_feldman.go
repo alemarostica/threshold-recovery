@@ -32,8 +32,9 @@ func SplitVSS(ctx *CurveCtx, secret []byte, n, k int) ([]Share, []Commitment, er
 	comms := make([]Commitment, k)
 	for j := range k {
 		x, y := ctx.Curve.ScalarBaseMult(coeffs[j].Bytes()) // (x,y) = aj*G (G=Base Point)
-		pointBytes := elliptic.Marshal(ctx.Curve, x, y)
-		comms[j] = pointBytes
+		comms[j] = Commitment{
+			Point: elliptic.Marshal(ctx.Curve, x, y),
+		}
 	}
 
 	// Shares
@@ -51,7 +52,7 @@ func SplitVSS(ctx *CurveCtx, secret []byte, n, k int) ([]Share, []Commitment, er
 		}
 
 		shares[i-1] = Share{
-			ID: i,   // i
+			Index: i,   // i
 			Value: val, // f(i)
 		}
 
@@ -74,8 +75,8 @@ func VerifyShareFeldman(ctx *CurveCtx, sh Share, comms []Commitment) bool {
 	// RHS
 	var rx, ry *big.Int
 	for j, c := range comms {
-		cx, cy := elliptic.Unmarshal(ctx.Curve, c)  // point corresponding to commitment
-		w := powInt(sh.ID, j, ctx.N)                   //i^j mod ctx.N
+		cx, cy := elliptic.Unmarshal(ctx.Curve, c.Point)  // point corresponding to commitment
+		w := powInt(sh.Index, j, ctx.N)                   //i^j mod ctx.N
 		tx, ty := ctx.Curve.ScalarMult(cx, cy, w.Bytes()) // (tx,ty)=i^j(aj*G)
 		if rx == nil {
 			rx, ry = tx, ty

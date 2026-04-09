@@ -201,7 +201,7 @@ func PartialSignStrict(ctx *CurveCtx, sh Share, ns *NonceShare, lambda, e *big.I
 	if ns == nil {
 		return nil, errors.New("nil nonce share")
 	}
-	if sh.ID != ns.Index {
+	if sh.Index != ns.Index {
 		return nil, errors.New("index mismatch")
 	}
 	if lambda == nil || e == nil {

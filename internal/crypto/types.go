@@ -8,12 +8,14 @@ import (
 
 // Share represents a Shamir secret share (i, s_i).
 type Share struct {
-	ID    int    `json:"id"`
+	Index int    `json:"index"`
 	Value []byte `json:"value"` // scalar, fixed length
 }
 
 // Commitment is a Feldman commitment C_j = a_j * G.
-type Commitment []byte
+type Commitment struct {
+	Point []byte `json:"point"`
+}
 
 // Signature is a standard Schnorr signature (R, z).
 type Signature struct {

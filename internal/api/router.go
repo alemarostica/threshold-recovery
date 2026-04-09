@@ -7,9 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"threshold-recovery/internal/core"
 	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/keyexchange"
 	"time"
+)
+
+var (
+	inbox      = make(map[string][]keyexchange.Message)
+	inboxMutex sync.RWMutex
 )
 
 // Define what the backend can do
@@ -48,6 +55,43 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
 	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
 	mux.HandleFunc("GET /participants", h.handleGetParticipants)
+	mux.HandleFunc("POST /relay/send", h.handlePostMessage)
+	mux.HandleFunc("GET /relay/messages", h.handleGetMessages)
+}
+
+func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
+	var msg keyexchange.Message
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "Invalid message format", http.StatusBadRequest)
+		return
+	}
+
+	inboxMutex.Lock()
+	inbox[msg.To] = append(inbox[msg.To], msg)
+	inboxMutex.Unlock()
+
+	w.WriteHeader(http.StatusAccepted)
+	// TODO: remove
+	fmt.Printf("[Relay] Message %s from %s to %s stored\n", msg.Type, msg.From, msg.To)
+}
+
+func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+
+	inboxMutex.Lock()
+	msgs := inbox[userID]
+	delete(inbox, userID)
+	inboxMutex.Unlock()
+
+	if msgs == nil {
+		msgs = []keyexchange.Message{}
+	}
+
+	json.NewEncoder(w).Encode(msgs)
 }
 
 func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +130,7 @@ func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
 
 	resp := SharePickupResponse{
 		ShareBlob: shareBlob,
-		Comms: wallet.Commitments,
+		Comms:     wallet.Commitments,
 	}
 
 	json.NewEncoder(w).Encode(resp)
@@ -108,7 +152,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing Public Key", http.StatusBadRequest)
 		return
 	}
-	
+
 	// Validate Cryptography
 	if !h.Verifier.VerifyShare(req.ServerShare, req.Commitments) {
 		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
