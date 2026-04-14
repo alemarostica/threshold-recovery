@@ -1,109 +1,95 @@
 package crypto
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/ecdh"    // BINGO! Addio crypto/elliptic
+	"crypto/ed25519" // Per le firme
+	"crypto/hkdf"    // Per la KDF
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
-	"math/big"
+
+	"golang.org/x/crypto/chacha20poly1305" // Per la cifratrua simmetrica
 )
 
-// implements keyexchange.CryptoProvider interface
-type DefaultProvider struct {
-	Ctx *CurveCtx
+// DefaultProvider non ha più bisogno del CurveCtx. X25519 è lo standard.
+type DefaultProvider struct{}
+
+func NewDefaultProvider() *DefaultProvider {
+	return &DefaultProvider{}
 }
 
-func NewDefaultProvider(ctx *CurveCtx) *DefaultProvider {
-	return &DefaultProvider{Ctx: ctx}
-}
-
+// Generazione chiavi effimere per ECDH x25519
 func (p *DefaultProvider) GenerateEphemeralDH() ([]byte, []byte, error) {
-	priv, x, y, err := elliptic.GenerateKey(p.Ctx.Curve, rand.Reader)
+	// Generiamo una chiave privata effimera su curva X25519
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
-	pub := elliptic.Marshal(p.Ctx.Curve, x, y)
-	return priv, pub, nil
+
+	// Restituiamo i byte crudi (32 byte per la privata, 32 per la pubblica)
+	return priv.Bytes(), priv.PublicKey().Bytes(), nil
 }
 
-func (p *DefaultProvider) ComputeSharedSecret(priv, peerPub []byte) ([]byte, error) {
-	x, y := elliptic.Unmarshal(p.Ctx.Curve, peerPub)
-	if x == nil {
-		return nil, errors.New("invalid public key")
-	}
-	sx, _ := p.Ctx.Curve.ScalarMult(x, y, priv)
-	return sx.Bytes(), nil
-}
-
-func (p *DefaultProvider) Sign(privSigKey []byte, msg []byte) ([]byte, error) {
-	priv := new(ecdsa.PrivateKey)
-	priv.PublicKey.Curve = p.Ctx.Curve
-	priv.D = new(big.Int).SetBytes(privSigKey)
-	priv.PublicKey.X, priv.PublicKey.Y = p.Ctx.Curve.ScalarBaseMult(privSigKey)
-
-	hash := p.Hash(msg)
-	r, s, err := ecdsa.Sign(rand.Reader, priv, hash)
+func (p *DefaultProvider) ComputeSharedSecret(privBytes, peerPubBytes []byte) ([]byte, error) {
+	// Ricostruiamo la nostra chiave privata
+	priv, err := ecdh.X25519().NewPrivateKey(privBytes)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid private key bytes")
 	}
 
-	// format as fixed 64 bytes
-	sig := make([]byte, 64)
-	r.FillBytes(sig[:32])
-	s.FillBytes(sig[:32])
-	return sig, nil
+	// Ricostruiamo e validiamo la chiave pubblica del peer (Go controlla automaticamente che sia valida!)
+	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
+	if err != nil {
+		return nil, errors.New("invalid peer public key")
+	}
+
+	// ECDH puro, sicuro e testato
+	return priv.ECDH(peerPub)
+}
+
+// firme: ed25519
+func (p *DefaultProvider) Sign(privSigKey []byte, msg []byte) ([]byte, error) {
+	if len(privSigKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("invalid ed25519 private key size")
+	}
+	return ed25519.Sign(privSigKey, msg), nil
 }
 
 func (p *DefaultProvider) Verify(pubSigKey []byte, msg []byte, sig []byte) bool {
-	if len(sig) != 64 {
+	if len(pubSigKey) != ed25519.PublicKeySize {
 		return false
 	}
-	x, y := elliptic.Unmarshal(p.Ctx.Curve, pubSigKey)
-	if x == nil {
-		return false
-	}
-	pub := &ecdsa.PublicKey{Curve: p.Ctx.Curve, X: x, Y: y}
-
-	r := new(big.Int).SetBytes(sig[:32])
-	s := new(big.Int).SetBytes(sig[32:])
-	return ecdsa.Verify(pub, p.Hash(msg), r, s)
+	return ed25519.Verify(pubSigKey, msg, sig)
 }
+
+// KDF (HKDF-SHA256)
 
 func (p *DefaultProvider) DeriveKey(sharedSecret, transcript []byte) ([]byte, error) {
-	h := sha256.New()
-	h.Write(sharedSecret)
-	h.Write(transcript)
-	return h.Sum(nil), nil
+	return hkdf.Key(sha256.New, sharedSecret, transcript, "share-transfer-v1", 32)
 }
 
+// AEAD (XChaCha20-Poly1305)
+
 func (p *DefaultProvider) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, error) {
-	block, err := aes.NewCipher(key)
+	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return nil, nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, nil, err
-	}
-	nonce := p.RandomNonce()[:gcm.NonceSize()]
-	ct := gcm.Seal(nil, nonce, plaintext, aad)
+
+	nonce := p.RandomNonce()[:aead.NonceSize()]
+	ct := aead.Seal(nil, nonce, plaintext, aad)
 	return ct, nonce, nil
 }
 
 func (p *DefaultProvider) Decrypt(key, nonce, ciphertext, aad []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	aead, err := chacha20poly1305.NewX(key)
 	if err != nil {
 		return nil, err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return gcm.Open(nil, nonce, ciphertext, aad)
+	return aead.Open(nil, nonce, ciphertext, aad)
 }
+
+// Utils
 
 func (p *DefaultProvider) RandomNonce() []byte {
 	b := make([]byte, 32)

@@ -5,7 +5,16 @@ import (
 	"errors"
 )
 
-// Avvio da parte di A (M1)
+// Helper interno per estrarre i dati in sicurezza
+func getBytes(data map[string][]byte, key string) ([]byte, error) {
+	val, ok := data[key]
+	if !ok || len(val) == 0 {
+		return nil, errors.New("missing or empty field: " + key)
+	}
+	return val, nil
+}
+
+// ---------------- M1: Avvio da parte di A ----------------
 
 func StartAsInitiator(
 	myID, peerID string,
@@ -27,15 +36,10 @@ func StartAsInitiator(
 	}
 
 	state.NonceA = crypto.RandomNonce()
-
 	epoch := dir.GetEpoch()
 
 	payload := bytes.Join([][]byte{
-		[]byte("M1"),
-		[]byte(myID),
-		[]byte(peerID),
-		state.MyPub,
-		state.NonceA,
+		[]byte("M1"), []byte(myID), []byte(peerID), state.MyPub, state.NonceA,
 	}, nil)
 
 	sig, err := crypto.Sign(mySigPriv, payload)
@@ -58,7 +62,7 @@ func StartAsInitiator(
 	return state, sender.Send(msg)
 }
 
-// Gestione M1 lato B → risposta M2
+// ---------------- M2: Gestione M1 lato B e Risposta ----------------
 
 func HandleM1(
 	msg Message,
@@ -69,49 +73,50 @@ func HandleM1(
 	mySigPriv []byte,
 ) (*SessionState, error) {
 
-	state := &SessionState{
-		MyID:   myID,
-		PeerID: msg.From,
-	}
-
 	peerPubSig, err := dir.GetPublicKey(msg.From)
 	if err != nil {
 		return nil, err
 	}
 
-	payload := bytes.Join([][]byte{
-		[]byte("M1"),
-		[]byte(msg.From),
-		[]byte(myID),
-		msg.Data["X"],
-		msg.Data["nonceA"],
-	}, nil)
-
-	if !crypto.Verify(peerPubSig, payload, msg.Data["sig"]) {
-		return nil, errors.New("invalid signauture")
+	x, err := getBytes(msg.Data, "X")
+	if err != nil {
+		return nil, err
+	}
+	nonceA, err := getBytes(msg.Data, "nonceA")
+	if err != nil {
+		return nil, err
+	}
+	sigM1, err := getBytes(msg.Data, "sig")
+	if err != nil {
+		return nil, err
 	}
 
-	state.PeerPub = msg.Data["X"]
-	state.NonceA = msg.Data["nonceA"]
+	payload := bytes.Join([][]byte{
+		[]byte("M1"), []byte(msg.From), []byte(myID), x, nonceA,
+	}, nil)
+
+	if !crypto.Verify(peerPubSig, payload, sigM1) {
+		return nil, errors.New("invalid M1 signature")
+	}
+
+	state := &SessionState{
+		MyID:    myID,
+		PeerID:  msg.From,
+		PeerPub: x,
+		NonceA:  nonceA,
+	}
 
 	state.MyPriv, state.MyPub, err = crypto.GenerateEphemeralDH()
 	if err != nil {
 		return nil, err
 	}
-
 	state.NonceB = crypto.RandomNonce()
 
 	payload2 := bytes.Join([][]byte{
-		[]byte("M2"),
-		[]byte(myID),
-		[]byte(msg.From),
-		state.MyPub,
-		state.PeerPub,
-		state.NonceA,
-		state.NonceB,
+		[]byte("M2"), []byte(myID), []byte(msg.From), state.MyPub, state.PeerPub, state.NonceA, state.NonceB,
 	}, nil)
 
-	sig, err := crypto.Sign(mySigPriv, payload2)
+	sigM2, err := crypto.Sign(mySigPriv, payload2)
 	if err != nil {
 		return nil, err
 	}
@@ -125,14 +130,14 @@ func HandleM1(
 			"Y":      state.MyPub,
 			"nonceA": state.NonceA,
 			"nonceB": state.NonceB,
-			"sig":    sig,
+			"sig":    sigM2,
 		},
 	}
 
 	return state, sender.Send(reply)
 }
 
-// Gestione M2 lato A → derivazione chiave + M3
+// ---------------- M3: Gestione M2 lato A e Derivazione Chiave ----------------
 
 func HandleM2AsInitiator(
 	state *SessionState,
@@ -140,8 +145,7 @@ func HandleM2AsInitiator(
 	crypto CryptoProvider,
 	dir Directory,
 	sender MessageSender,
-	mySigPriv []byte,
-	plaintext []byte,
+	plaintext []byte, // La tua Share
 ) error {
 
 	peerPubSig, err := dir.GetPublicKey(msg.From)
@@ -149,22 +153,38 @@ func HandleM2AsInitiator(
 		return err
 	}
 
-	payload := bytes.Join([][]byte{
-		[]byte("M2"),
-		[]byte(msg.From),
-		[]byte(state.MyID),
-		msg.Data["Y"],
-		state.MyPub,
-		msg.Data["nonceA"],
-		msg.Data["nonceB"],
-	}, nil)
-
-	if !crypto.Verify(peerPubSig, payload, msg.Data["sig"]) {
-		return errors.New("invalid signature")
+	y, err := getBytes(msg.Data, "Y")
+	if err != nil {
+		return err
+	}
+	nonceA_rec, err := getBytes(msg.Data, "nonceA")
+	if err != nil {
+		return err
+	}
+	nonceB, err := getBytes(msg.Data, "nonceB")
+	if err != nil {
+		return err
+	}
+	sigM2, err := getBytes(msg.Data, "sig")
+	if err != nil {
+		return err
 	}
 
-	state.PeerPub = msg.Data["Y"]
-	state.NonceB = msg.Data["nonceB"]
+	// CRITICO: Controllo Anti-Replay
+	if !bytes.Equal(nonceA_rec, state.NonceA) {
+		return errors.New("security alert: nonceA mismatch! Possible replay attack")
+	}
+
+	payload := bytes.Join([][]byte{
+		[]byte("M2"), []byte(msg.From), []byte(state.MyID), y, state.MyPub, nonceA_rec, nonceB,
+	}, nil)
+
+	if !crypto.Verify(peerPubSig, payload, sigM2) {
+		return errors.New("invalid M2 signature")
+	}
+
+	state.PeerPub = y
+	state.NonceB = nonceB
 
 	shared, err := crypto.ComputeSharedSecret(state.MyPriv, state.PeerPub)
 	if err != nil {
@@ -172,21 +192,16 @@ func HandleM2AsInitiator(
 	}
 
 	tr := bytes.Join([][]byte{
-		[]byte(state.MyID),
-		[]byte(state.PeerID),
-		state.MyPub,
-		state.PeerPub,
-		state.NonceA,
-		state.NonceB,
+		[]byte(state.MyID), []byte(state.PeerID), state.MyPub, state.PeerPub, state.NonceA, state.NonceB,
 	}, nil)
-
 	state.Transcript = crypto.Hash(tr)
+
 	state.SharedKey, err = crypto.DeriveKey(shared, state.Transcript)
 	if err != nil {
 		return err
 	}
 
-	ct, nonce, err := crypto.Encrypt(state.SharedKey, plaintext, state.Transcript)
+	ct, nonceAEAD, err := crypto.Encrypt(state.SharedKey, plaintext, state.Transcript)
 	if err != nil {
 		return err
 	}
@@ -198,14 +213,14 @@ func HandleM2AsInitiator(
 		Epoch: msg.Epoch,
 		Data: map[string][]byte{
 			"ct":    ct,
-			"nonce": nonce,
+			"nonce": nonceAEAD,
 		},
 	}
 
 	return sender.Send(msg3)
 }
 
-// Gestione M3 lato B (decifrazione)
+// ---------------- Gestione M3 lato B (Decifrazione) ----------------
 
 func HandleM3(
 	state *SessionState,
@@ -213,28 +228,30 @@ func HandleM3(
 	crypto CryptoProvider,
 ) ([]byte, error) {
 
-	ct := msg.Data["ct"]
-	nonce := msg.Data["nonce"]
+	ct, err := getBytes(msg.Data, "ct")
+	if err != nil {
+		return nil, err
+	}
+	nonceAEAD, err := getBytes(msg.Data, "nonce")
+	if err != nil {
+		return nil, err
+	}
 
 	shared, err := crypto.ComputeSharedSecret(state.MyPriv, state.PeerPub)
 	if err != nil {
 		return nil, err
 	}
 
+	// Stesso ordine esatto di A per il transcript
 	tr := bytes.Join([][]byte{
-		[]byte(state.PeerID),
-		[]byte(state.MyID),
-		state.PeerPub,
-		state.MyPub,
-		state.NonceA,
-		state.NonceB,
+		[]byte(state.PeerID), []byte(state.MyID), state.PeerPub, state.MyPub, state.NonceA, state.NonceB,
 	}, nil)
-
 	state.Transcript = crypto.Hash(tr)
+
 	state.SharedKey, err = crypto.DeriveKey(shared, state.Transcript)
 	if err != nil {
 		return nil, err
 	}
 
-	return crypto.Decrypt(state.SharedKey, nonce, ct, state.Transcript)
+	return crypto.Decrypt(state.SharedKey, nonceAEAD, ct, state.Transcript)
 }
