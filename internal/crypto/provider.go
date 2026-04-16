@@ -37,7 +37,7 @@ func (p *DefaultProvider) ComputeSharedSecret(privBytes, peerPubBytes []byte) ([
 		return nil, errors.New("invalid private key bytes")
 	}
 
-	// Ricostruiamo e validiamo la chiave pubblica del peer (Go controlla automaticamente che sia valida!)
+	// Ricostruiamo la chiave pubblica del peer e ne verifichiamo il formato base.
 	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
 	if err != nil {
 		return nil, errors.New("invalid peer public key")
@@ -76,7 +76,8 @@ func (p *DefaultProvider) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, e
 		return nil, nil, err
 	}
 
-	nonce := p.RandomNonce()[:aead.NonceSize()]
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
 	ct := aead.Seal(nil, nonce, plaintext, aad)
 	return ct, nonce, nil
 }
