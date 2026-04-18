@@ -49,7 +49,7 @@ func NewHandler(s WalletService, v crypto.Verifier, a core.AuditLogger) *Handler
 // Every specific endpoint will execute the specific handler
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.handleRegister)
-	mux.HandleFunc("POST /liveness", h.handleLiveness)
+	// mux.HandleFunc("POST /liveness", h.handleLiveness)
 	mux.HandleFunc("GET /status/{id}", h.handleStatus)
 	mux.HandleFunc("POST /recover", h.handleSignRecovery)
 	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
@@ -191,7 +191,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"registered"}`))
 }
 
-func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
+// TODO: risolvere this bullshittery con Signature invece che []byte
+/* func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	// Decode the request
 	var req LivenessRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -217,6 +218,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
 	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
 
+	
 	if !h.Verifier.VerifySignature(wallet.PublicKey, []byte(msg), req.Signature) {
 		h.Audit.Log(pubKeyHex, core.EventLiveness, "Invalid Signature")
 		http.Error(w, "Invalid Signature", http.StatusUnauthorized)
@@ -232,7 +234,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"liveness_updated"}`))
-}
+        } */
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.PathValue("id")

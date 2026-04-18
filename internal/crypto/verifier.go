@@ -16,7 +16,9 @@ func (v *FeldmanVerifier) VerifyShare(share Share, comms []Commitment) bool {
 }
 
 func (v *FeldmanVerifier) VerifySignature(pubKey []byte, message []byte, signature []byte) bool {
-	return true // TODO
+	// TODO: VerifySignatureSessionBound
+	// return VerifySignatureStandard(v.Ctx, pubKey, message, signature)
+	return true
 }
 
 // Placeholder until TSS is implemented

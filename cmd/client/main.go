@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
@@ -19,6 +20,12 @@ import (
 	"threshold-recovery/internal/keyexchange"
 	"time"
 )
+
+// Ricorda lo stato delle sessioni di handshake in corso
+var activeSessions = make(map[string]*keyexchange.SessionState)
+
+// Salva temporaneamente le share in attesa che l'handshake finisca
+var pendingShares = make(map[string][]byte)
 
 // Configuration
 const (
@@ -42,36 +49,6 @@ type Identity struct {
 
 type ClientSender struct{}
 
-func (cs *ClientSender) Send(msg keyexchange.Message) error {
-	err := callAPI("POST", "/relay/send", msg, nil)
-	if err != nil {
-		return fmt.Errorf("failed to send relay message: %v", err)
-	}
-	return nil
-}
-
-type ClientDirectory struct {
-	DB *LocalDB
-}
-
-func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
-	if userID == cd.DB.MyIdentity.Name {
-		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
-	}
-
-	hexKey, exists := cd.DB.Contacts[userID]
-	if !exists {
-		return nil, fmt.Errorf("user %s not found in local contacts", userID)
-	}
-
-	return hex.DecodeString(hexKey)
-}
-
-// TODO: this is a demo
-func (cd *ClientDirectory) GetEpoch() uint64 {
-	return 1
-}
-
 // Main
 func main() {
 	db := loadDB()
@@ -81,6 +58,8 @@ func main() {
 	if db.MyIdentity == nil {
 		setupIdentity(reader, db)
 	}
+
+	startMessagePoller(db)
 
 	// Loop
 	for {
@@ -168,6 +147,137 @@ func callAPI(method, path string, payload interface{}, out interface{}) error {
 	return nil
 }
 
+func startMessagePoller(db *LocalDB) {
+	ticker := time.NewTicker(3 * time.Second) // Frequenza di polling
+	go func() {
+		for range ticker.C {
+			pollRelay(db)
+		}
+	}()
+}
+
+func pollRelay(db *LocalDB) {
+	if db.MyIdentity == nil {
+		return // skippa se non registrato
+	}
+
+	var msgs []keyexchange.Message
+	err := callAPI("GET", "/relay/messages?user_id="+db.MyIdentity.Name, nil, &msgs)
+	if err != nil {
+		fmt.Printf("Failed to fetch messages from relay: %v\n", err)
+		return
+	}
+	if len(msgs) == 0 {
+		return // no messages
+	}
+
+	provider := crypto.NewDefaultProvider()
+	dir := &ClientDirectory{DB: db}
+	sender := &ClientSender{}
+	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+
+	
+	for _, msg := range msgs {
+		fmt.Printf("\n[RELAY] Received message %s from %s\n", msg.Type, msg.From)
+
+		switch msg.Type {
+		case keyexchange.M1:
+			state, err := keyexchange.HandleM1(msg, db.MyIdentity.Name, provider, dir, sender, myPriv)
+			if err != nil {
+				fmt.Printf("[RELAY] Error: failed to handle M1 message from %s: %v\n", msg.From, err)
+				continue
+			}
+			activeSessions[msg.From] = state
+			fmt.Printf("[RELAY] Succesfully sent M2 to %s\n", msg.From)
+		case keyexchange.M2:
+			// We are dealer, friend responded
+			// retrieve the session state
+			state, ok := activeSessions[msg.From]
+			if !ok {
+				fmt.Printf("Error: no active session found for M2 from %s\n", msg.From)
+				continue
+			}
+
+			// Retrieve the pending share
+			shareBlob, ok := pendingShares[msg.From]
+			if !ok {
+				fmt.Printf("No pending share to send to %s\n", msg.From)
+				continue
+			}
+
+			// Process M2 and send M3 with share
+			err := keyexchange.HandleM2AsInitiator(state, msg, provider, dir, sender, shareBlob)
+			if err != nil {
+				fmt.Printf("Failed to handle M2 from %s: %v\n", msg.From, err)
+				continue
+			}
+
+			fmt.Printf("M2 verified. Sent M3 to %s.\n", msg.From)
+
+			delete(activeSessions, msg.From)
+			delete(pendingShares, msg.From)
+		case keyexchange.M3:
+			// We are shareholder, dealer sent us encrypted share with M3
+			state, ok := activeSessions[msg.From]
+			if !ok {
+				fmt.Printf("Non active session found for M3 from %s\n", msg.From)
+				continue
+			}
+
+			// Decrypt share
+			plaintextShare, err := keyexchange.HandleM3(state, msg, provider)
+			if err != nil {
+				fmt.Printf("Failed to decrypt M3 from %s: %v\n", msg.From, err)
+				continue
+			}
+
+			// We received the share
+			// TODO: Save?
+			fmt.Printf("Succesfully received share from %s.", msg.From)
+
+			// Temporary print
+			if len(plaintextShare) > 16 {
+				fmt.Printf("share preview: %x...\n", plaintextShare[:16])
+			}
+
+			delete(activeSessions, msg.From)
+		}
+
+		// the prompt
+		fmt.Print("\nSelect an option: ")
+	}
+}
+
+func (cs *ClientSender) Send(msg keyexchange.Message) error {
+	err := callAPI("POST", "/relay/send", msg, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send relay message: %v", err)
+	}
+	return nil
+}
+
+type ClientDirectory struct {
+	DB *LocalDB
+}
+
+func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
+	if userID == cd.DB.MyIdentity.Name {
+		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
+	}
+
+	hexKey, exists := cd.DB.Contacts[userID]
+	if !exists {
+		return nil, fmt.Errorf("user %s not found in local contacts", userID)
+	}
+
+	return hex.DecodeString(hexKey)
+}
+
+// TODO: this is a demo
+func (cd *ClientDirectory) GetEpoch() uint64 {
+	return 1
+}
+
 func createWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
 
@@ -251,33 +361,12 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	serverShare := shares[0]
 	friendSharesRaw := shares[1:]
 
-	// Encrypt and package friend shares
-	var mailbox []api.FriendShareInput
-	for i, s := range friendSharesRaw {
-		// Will need a way to identify which friend gets which share
-		// For now we simulate with a dummy FriendPubKey
-		friendKey := friendKeys[i]
-
-		shareBlob, err := crypto.MarshalShare(s)
-		if err != nil {
-			fmt.Printf("Failed to marshal friend share %d: %v", i, err)
-			return
-		}
-
-		// for now, send raw, later will encrypt
-		mailbox = append(mailbox, api.FriendShareInput{
-			FriendPubKey:  friendKey,
-			EncryptedBlob: shareBlob,
-		})
-	}
-
-	// Mock encrypting logic
 	req := api.RegisterRequest{
-		PublicKey:           pubKeyBytes,
-		ServerShare:         serverShare,
-		Commitments:         commitments,
+		PublicKey: pubKeyBytes,
+		ServerShare: serverShare,
+		Commitments: commitments,
 		InactivityThreshold: timeoutDur,
-		FriendShares:        mailbox,
+		FriendShares: []api.FriendShareInput{}, // Vuota??
 	}
 
 	if err := callAPI("POST", "/register", req, nil); err != nil {
@@ -285,13 +374,41 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
+	provider := crypto.NewDefaultProvider()
+	dir := &ClientDirectory{DB: db}
+	sender := &ClientSender{}
+	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+
+	fmt.Println("starting key exchange...")
+
+	for i, cn := range chosenNames {
+		friendName := strings.TrimSpace(cn)
+
+		shareBlob, err := crypto.MarshalShare(friendSharesRaw[i])
+		if err != nil {
+			fmt.Printf("Marshal error for share %s: %v\n", friendName, err)
+			continue
+		}
+
+		pendingShares[friendName] = shareBlob
+
+		state, err := keyexchange.StartAsInitiator(db.MyIdentity.Name, friendName, provider, dir, sender, myPriv)
+		if err != nil {
+			fmt.Printf("Failed handshake with %s: %v\n", friendName, err)
+			continue
+		}
+
+		activeSessions[friendName] = state
+		fmt.Printf("Sent M1 messages to %s\n", friendName)
+	}
+
 	wHex := hex.EncodeToString(pubKeyBytes)
 	db.MyWallets[wHex] = walletName
 	saveDB(db)
 
-	fmt.Println("SUCCESS: Wallet registered!")
+	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
-	fmt.Println("IMPORTANT: Give this hex key to your shareholders so they can watch it.")
+	fmt.Println("Handshakes succesfully initiated")
 }
 
 func checkWallets(db *LocalDB) {
@@ -343,24 +460,30 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 }
 
 func setupIdentity(r *bufio.Reader, db *LocalDB) {
+Begin:
 	fmt.Print("Choose username: ")
 	name := readInput(r)
 
-	ctx := crypto.NewCurveCtx()
-	priv, x, y, _ := elliptic.GenerateKey(ctx.Curve, rand.Reader)
-	pubBytes := elliptic.Marshal(ctx.Curve, x, y)
-
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Printf("Failed to generate identity keys: %v\n", err)
+		return
+	}
+	
 	db.MyIdentity = &Identity{
-		Name: name,
-		PublicKey: hex.EncodeToString(pubBytes),
-		PrivateKey: hex.EncodeToString(priv),
+		Name:       name,
+		PublicKey:  hex.EncodeToString(pubKey),
+		PrivateKey: hex.EncodeToString(privKey),
+	}
+	
+	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
+	if err := callAPI("POST", "/participants", req, nil); err != nil {
+		fmt.Printf("Server registration failed: %v\n", err)
+		// goto jumpscare
+		// Però dai, nel kernel di Linux lo usano in questa maniera quindi ci sta
+		goto Begin
 	}
 	saveDB(db)
-
-	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubBytes}
-	if err := callAPI("POST", "/participants", req, nil); err != nil {
-		fmt.Println("Server registration failed, but identity saved locally.")
-	}
 }
 
 // Helpers

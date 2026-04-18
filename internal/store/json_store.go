@@ -18,11 +18,12 @@ import (
 
 // The JSONStore is simply a path to a directory
 type JSONStore struct {
-	DataDir    string
-	HMACSecret []byte
+	DataDir     string
+	HMACSecret  []byte
+	PKeyIDDBDir string
 }
 
-func NewJSONStore(dir string, secret string) *JSONStore {
+func NewJSONStore(dir, secret string) *JSONStore {
 	return &JSONStore{
 		DataDir:    dir,
 		HMACSecret: []byte(secret),
@@ -95,24 +96,44 @@ func (s *JSONStore) deriveID(pubKey []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func (s *JSONStore) loadParticipants() (map[string]*core.Participant, error) {
+	path := filepath.Join(s.DataDir, "participants.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]*core.Participant), nil
+		}
+		return nil, err
+	}
+
+	var participants map[string]*core.Participant
+	if err := json.Unmarshal(data, &participants); err != nil {
+		return nil, err
+	}
+
+	return participants, nil
+}
+
 // Creates a new "registered user"
 func (s *JSONStore) SaveParticipant(p *core.Participant) error {
-	// Create participants dir if it does it exist
-	partDir := filepath.Join(s.DataDir, "participants")
-	if err := os.MkdirAll(partDir, 0755); err != nil {
-		return err
-	}
-
-	path := filepath.Join(partDir, p.ID+".json")
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("participant ID '%s' already taken", p.ID)
-	}
-
-	data, err := json.MarshalIndent(p, "", "  ")
+	participants, err := s.loadParticipants()
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+
+	if _, exists := participants[p.ID]; exists {
+		return fmt.Errorf("participant ID '%s' is taken", p.ID)
+	}
+
+	participants[p.ID] = p
+
+	data, err := json.MarshalIndent(participants, "", "  ")
+	if err != nil {
+		return nil
+	}
+
+	path := filepath.Join(s.DataDir, "participants.json")
+	return os.WriteFile(path, data, 0600)
 }
 
 // Retrieves a "registered user"
