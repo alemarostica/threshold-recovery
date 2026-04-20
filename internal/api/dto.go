@@ -52,3 +52,14 @@ type RegisterParticipantRequest struct {
 	ID        string `json:"id"`
 	PublicKey []byte `json:"public_key"`
 }
+
+type ParticipantResponse struct {
+	ID        string `json:"id"`
+	PublicKey []byte `json:"public_key"`
+	Epoch     uint64 `json:"epoch"`
+}
+
+type SignedParticipantResponse struct {
+	Data      ParticipantResponse `json:"data"`
+	Signature []byte                 `json:"signature"`
+}

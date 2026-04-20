@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -33,10 +37,50 @@ func main() {
 	// Setup audit Logger
 	auditLogger := core.NewAuditLogger(filepath.Join(cfg.DataDir, "audit.log"))
 
+	// Server key infrastructure
+	keyPath := filepath.Join(cfg.DataDir, "server_identity.key")
+	var serverPriv ed25519.PrivateKey
+	var serverPub ed25519.PublicKey
+
+	// Does the key already exist?
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
+		// it does, load it
+		privBytes, err := hex.DecodeString(string(data))
+		if err != nil {
+			log.Fatalf("Error decoding: %v", err)
+		}
+
+		if len(privBytes) != ed25519.PrivateKeySize {
+			log.Fatalf("Private key not valid")
+		}
+
+		serverPriv = ed25519.PrivateKey(privBytes)
+		serverPub = serverPriv.Public().(ed25519.PublicKey)
+	} else {
+		// it does not, generate one
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			log.Fatalf("Error key generation: %v", err)
+		}
+
+		serverPriv = priv
+		serverPub = pub
+
+		// scrivo la chiave sul file
+		err = os.WriteFile(keyPath, []byte(hex.EncodeToString(priv)), 0600)
+		if err != nil {
+			log.Fatalf("Failed to save the key: %v", err)
+		}
+	}
+
+	// TODO: bruh decidere se inviarla o hardcodarla
+	fmt.Printf("Server pubKey: %s\n", serverPub)
+
 	// Logic and API
 	// struct in internal/api/router.go
 	verifier := crypto.NewFeldmanVerifier()
-	handler := api.NewHandler(fileStore, verifier, *auditLogger)
+	handler := api.NewHandler(fileStore, verifier, *auditLogger, serverPriv)
 
 	// Router
 	mux := http.NewServeMux()

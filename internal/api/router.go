@@ -2,11 +2,11 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 	"sync"
 	"threshold-recovery/internal/core"
 	"threshold-recovery/internal/crypto"
@@ -28,20 +28,27 @@ type WalletService interface {
 	RegisterWallet(w *core.Wallet) error
 	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
 	SaveParticipant(p *core.Participant) error
-	GetParticipant(id string) (*core.Participant, error)
+	GetParticipant(id string) (*core.Participant, uint64, error)
 }
 
 type Handler struct {
 	Service  WalletService
 	Verifier crypto.Verifier
 	Audit    core.AuditLogger
+	PrivKey  ed25519.PrivateKey
 }
 
-func NewHandler(s WalletService, v crypto.Verifier, a core.AuditLogger) *Handler {
+func NewHandler(
+	s WalletService,
+	v crypto.Verifier,
+	a core.AuditLogger,
+	privKey ed25519.PrivateKey,
+) *Handler {
 	return &Handler{
 		Service:  s,
 		Verifier: v,
 		Audit:    a,
+		PrivKey:  privKey,
 	}
 }
 
@@ -218,7 +225,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
 	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
 
-	
+
 	if !h.Verifier.VerifySignature(wallet.PublicKey, []byte(msg), req.Signature) {
 		h.Audit.Log(pubKeyHex, core.EventLiveness, "Invalid Signature")
 		http.Error(w, "Invalid Signature", http.StatusUnauthorized)
@@ -250,7 +257,7 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"recoverable":         wallet.IsRecoverable(),
 		"last_activity":       wallet.LastActivity,
 		"time_until_recovery": time.Until(wallet.LastActivity.Add(wallet.InactivityThreshold)).String(),
@@ -329,22 +336,32 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {
-	idsParam := r.URL.Query().Get("ids")
-	if idsParam == "" {
-		http.Error(w, "Missing 'ids' query parameter", http.StatusBadRequest)
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing 'id' query parameter", http.StatusBadRequest)
 		return
 	}
 
-	ids := strings.Split(idsParam, ",")
-	// Map ID to PubKey
-	response := make(map[string][]byte)
-
-	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if p, err := h.Service.GetParticipant(id); err == nil {
-			response[id] = p.PublicKey
-		}
+	p, epoch, err := h.Service.GetParticipant(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
 	}
 
-	json.NewEncoder(w).Encode(response)
+	respData := ParticipantResponse{
+		ID:        p.ID,
+		PublicKey: p.PublicKey,
+		Epoch:     epoch,
+	}
+
+	dataBytes, _ := json.Marshal(respData)
+	signature := ed25519.Sign(h.PrivKey, dataBytes)
+
+	signedResp := SignedParticipantResponse{
+		Data:      respData,
+		Signature: signature,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(signedResp)
 }

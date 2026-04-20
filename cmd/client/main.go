@@ -29,16 +29,18 @@ var pendingShares = make(map[string][]byte)
 
 // Configuration
 const (
-	ServerURL = "https://localhost:8443"
-	DBFile    = "client_db.json"
+	ServerURL             = "https://localhost:8443"
+	DBFile                = "client_db.json"
+	PinnedServerPubKeyHex = ""
 )
 
 // Local storage models
 type LocalDB struct {
-	MyIdentity *Identity         `json:"my_identity"`
-	Contacts   map[string]string `json:"contacts"`
-	WatchList  map[string]string `json:"watchlist"`
-	MyWallets  map[string]string `json:"my_wallets"`
+	MyIdentity     *Identity         `json:"my_identity"`
+	Contacts       map[string]string `json:"contacts"`
+	WatchList      map[string]string `json:"watchlist"`
+	MyWallets      map[string]string `json:"my_wallets"`
+	DirectoryEpoch uint64            `json:"directory_epoch"`
 }
 
 type Identity struct {
@@ -176,7 +178,6 @@ func pollRelay(db *LocalDB) {
 	sender := &ClientSender{}
 	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
 
-	
 	for _, msg := range msgs {
 		fmt.Printf("\n[RELAY] Received message %s from %s\n", msg.Type, msg.From)
 
@@ -362,11 +363,11 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	friendSharesRaw := shares[1:]
 
 	req := api.RegisterRequest{
-		PublicKey: pubKeyBytes,
-		ServerShare: serverShare,
-		Commitments: commitments,
+		PublicKey:           pubKeyBytes,
+		ServerShare:         serverShare,
+		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
-		FriendShares: []api.FriendShareInput{}, // Vuota??
+		FriendShares:        []api.FriendShareInput{}, // Vuota??
 	}
 
 	if err := callAPI("POST", "/register", req, nil); err != nil {
@@ -469,13 +470,13 @@ Begin:
 		fmt.Printf("Failed to generate identity keys: %v\n", err)
 		return
 	}
-	
+
 	db.MyIdentity = &Identity{
 		Name:       name,
 		PublicKey:  hex.EncodeToString(pubKey),
 		PrivateKey: hex.EncodeToString(privKey),
 	}
-	
+
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
 	if err := callAPI("POST", "/participants", req, nil); err != nil {
 		fmt.Printf("Server registration failed: %v\n", err)
@@ -526,17 +527,37 @@ func showIdentity(db *LocalDB) {
 }
 
 func addContact(r *bufio.Reader, db *LocalDB) {
-	fmt.Print("Friend's name: ")
+	fmt.Printf("Friend's name: ")
 	name, _ := r.ReadString('\n')
 	name = strings.TrimSpace(name)
 
-	fmt.Print("Friend's public key (Hex): ")
-	key, _ := r.ReadString('\n')
-	key = strings.TrimSpace(key)
+	var resp api.SignedParticipantResponse
+	err := callAPI("GET", fmt.Sprintf("/participants?id=%s", name), nil, &resp)
+	if err != nil {
+		fmt.Printf("Failed to fetch participant %s: %v", name, err)
+		return
+	}
 
-	db.Contacts[name] = key
+	dataBytes, _ := json.Marshal(resp.Data)
+	// TODO: pubkey del server hardcoded, la facciamo inviare dal server?
+	// Dovrebbe essere inviata con TLS quindi non dovrebbero esserci problemi.
+	serverPubKey, _ := hex.DecodeString(PinnedServerPubKeyHex)
+
+	if !ed25519.Verify(serverPubKey, dataBytes, resp.Signature) {
+		fmt.Println("Invalid server signature!")
+		return
+	}
+
+	if resp.Data.Epoch < db.DirectoryEpoch {
+		fmt.Printf("Epoch rollback")
+		return
+	}
+
+	db.DirectoryEpoch = resp.Data.Epoch
+	db.Contacts[name] = hex.EncodeToString(resp.Data.PublicKey)
 	saveDB(db)
-	fmt.Println("Contact saved.")
+
+	fmt.Printf("Contact '%s' fetched and verified.\n", name)
 }
 
 func addToWatchlist(r *bufio.Reader, db *LocalDB) {

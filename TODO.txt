@@ -12,3 +12,4 @@
 - Fase 0 nel protocollo di handshake
 - Cosa succede se si forgia un messaggio di handshake senza rispettare la sequenza?
   + Dovrebbe essere sicuro, might as well check
+- THE GREAT TYPE UNIFICATION HAS TO BE DONE IN ORDER TO NOT GO MAD

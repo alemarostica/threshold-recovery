@@ -23,6 +23,11 @@ type JSONStore struct {
 	PKeyIDDBDir string
 }
 
+type ParticipantDirectory struct {
+	Epoch        uint64                        `json:"epoch"`
+	Participants map[string]*core.Participant `json:"participants"`
+}
+
 func NewJSONStore(dir, secret string) *JSONStore {
 	return &JSONStore{
 		DataDir:    dir,
@@ -96,38 +101,41 @@ func (s *JSONStore) deriveID(pubKey []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (s *JSONStore) loadParticipants() (map[string]*core.Participant, error) {
+func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
 	path := filepath.Join(s.DataDir, "participants.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return make(map[string]*core.Participant), nil
+			return &ParticipantDirectory{
+				Epoch: 0, // TODO: ma un int
+				Participants: make(map[string]*core.Participant),
+			}, nil
 		}
 		return nil, err
 	}
 
-	var participants map[string]*core.Participant
-	if err := json.Unmarshal(data, &participants); err != nil {
+	var dir ParticipantDirectory
+	if err := json.Unmarshal(data, &dir); err != nil {
 		return nil, err
 	}
-
-	return participants, nil
+	return &dir, nil
 }
 
 // Creates a new "registered user"
 func (s *JSONStore) SaveParticipant(p *core.Participant) error {
-	participants, err := s.loadParticipants()
+	dir, err := s.loadDirectory()
 	if err != nil {
 		return err
 	}
 
-	if _, exists := participants[p.ID]; exists {
+	if _, exists := dir.Participants[p.ID]; exists {
 		return fmt.Errorf("participant ID '%s' is taken", p.ID)
 	}
 
-	participants[p.ID] = p
+	dir.Participants[p.ID] = p
+	dir.Epoch++
 
-	data, err := json.MarshalIndent(participants, "", "  ")
+	data, err := json.MarshalIndent(dir, "", "  ")
 	if err != nil {
 		return nil
 	}
@@ -137,16 +145,16 @@ func (s *JSONStore) SaveParticipant(p *core.Participant) error {
 }
 
 // Retrieves a "registered user"
-func (s *JSONStore) GetParticipant(id string) (*core.Participant, error) {
-	path := filepath.Join(s.DataDir, "participants", id+".json")
-	data, err := os.ReadFile(path)
+func (s *JSONStore) GetParticipant(id string) (*core.Participant, uint64, error) {
+	dir, err := s.loadDirectory()
 	if err != nil {
-		return nil, fmt.Errorf("participant not found")
+		return nil, 0, err
 	}
 
-	var p core.Participant
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, err
+	p, exists := dir.Participants[id]
+	if !exists {
+		return nil, dir.Epoch, fmt.Errorf("participant not found")
 	}
-	return &p, nil
+
+	return p, dir.Epoch, nil
 }
