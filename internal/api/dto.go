@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"threshold-recovery/internal/crypto"
 	"time"
 )
@@ -49,17 +50,17 @@ type SignRequest struct {
 }
 
 type RegisterParticipantRequest struct {
-	ID        string `json:"id"`
-	PublicKey []byte `json:"public_key"`
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
 }
 
 type ParticipantResponse struct {
-	ID        string `json:"id"`
-	PublicKey []byte `json:"public_key"`
-	Epoch     uint64 `json:"epoch"`
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
+	Epoch     uint64            `json:"epoch"`
 }
 
 type SignedParticipantResponse struct {
 	Data      ParticipantResponse `json:"data"`
-	Signature []byte                 `json:"signature"`
+	Signature []byte              `json:"signature"`
 }

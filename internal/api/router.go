@@ -198,8 +198,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"registered"}`))
 }
 
-// TODO: risolvere this bullshittery con Signature invece che []byte
-/* func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
+// É meglio che il
+func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	// Decode the request
 	var req LivenessRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -221,16 +221,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the signature
-	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
-	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
-
-
-	if !h.Verifier.VerifySignature(wallet.PublicKey, []byte(msg), req.Signature) {
-		h.Audit.Log(pubKeyHex, core.EventLiveness, "Invalid Signature")
-		http.Error(w, "Invalid Signature", http.StatusUnauthorized)
-		return
-	}
+	// The verification
 
 	// Update Liveness
 	if err := h.Service.UpdateLiveness(req.PublicKey); err != nil {
@@ -241,7 +232,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"liveness_updated"}`))
-        } */
+}
 
 func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := r.PathValue("id")

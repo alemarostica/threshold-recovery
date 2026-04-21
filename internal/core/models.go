@@ -1,6 +1,7 @@
 package core
 
 import (
+	"crypto/ed25519"
 	"threshold-recovery/internal/crypto"
 	"time"
 )
@@ -46,7 +47,7 @@ func (w *Wallet) IsRecoverable() bool {
 
 // Kind of like a registered user
 type Participant struct {
-	ID        string    `json:"id"`
-	PublicKey []byte    `json:"public_key"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
+	CreatedAt time.Time         `json:"created_at"`
 }

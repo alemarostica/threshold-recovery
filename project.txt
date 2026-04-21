@@ -1,0 +1,2849 @@
+===== FILE: ./internal/keyexchange/state.go =====
+package keyexchange
+
+type SessionState struct {
+	MyID   string
+	PeerID string
+
+	// DH
+	MyPriv  []byte
+	MyPub   []byte
+	PeerPub []byte
+
+	// Nonces
+	NonceA []byte
+	NonceB []byte
+
+	// Derived
+	SharedKey  []byte
+	Transcript []byte
+}
+
+===== FILE: ./internal/keyexchange/protocol.go =====
+package keyexchange
+
+import (
+	"bytes"
+	"errors"
+)
+
+// Helper interno per estrarre i dati in sicurezza
+func getBytes(data map[string][]byte, key string) ([]byte, error) {
+	val, ok := data[key]
+	if !ok || len(val) == 0 {
+		return nil, errors.New("missing or empty field: " + key)
+	}
+	return val, nil
+}
+
+// ---------------- M1: Avvio da parte di A ----------------
+
+func StartAsInitiator(
+	myID, peerID string,
+	crypto CryptoProvider,
+	dir Directory,
+	sender MessageSender,
+	mySigPriv []byte,
+) (*SessionState, error) {
+
+	state := &SessionState{
+		MyID:   myID,
+		PeerID: peerID,
+	}
+
+	var err error
+	state.MyPriv, state.MyPub, err = crypto.GenerateEphemeralDH()
+	if err != nil {
+		return nil, err
+	}
+
+	state.NonceA = crypto.RandomNonce()
+	epoch := dir.GetEpoch()
+
+	payload := bytes.Join([][]byte{
+		[]byte("M1"), []byte(myID), []byte(peerID), state.MyPub, state.NonceA,
+	}, nil)
+
+	sig, err := crypto.Sign(mySigPriv, payload)
+	if err != nil {
+		return nil, err
+	}
+
+	msg := Message{
+		Type:  M1,
+		From:  myID,
+		To:    peerID,
+		Epoch: epoch,
+		Data: map[string][]byte{
+			"X":      state.MyPub,
+			"nonceA": state.NonceA,
+			"sig":    sig,
+		},
+	}
+
+	return state, sender.Send(msg)
+}
+
+// ---------------- M2: Gestione M1 lato B e Risposta ----------------
+
+func HandleM1(
+	msg Message,
+	myID string,
+	crypto CryptoProvider,
+	dir Directory,
+	sender MessageSender,
+	mySigPriv []byte,
+) (*SessionState, error) {
+
+	peerPubSig, err := dir.GetPublicKey(msg.From)
+	if err != nil {
+		return nil, err
+	}
+
+	x, err := getBytes(msg.Data, "X")
+	if err != nil {
+		return nil, err
+	}
+	nonceA, err := getBytes(msg.Data, "nonceA")
+	if err != nil {
+		return nil, err
+	}
+	sigM1, err := getBytes(msg.Data, "sig")
+	if err != nil {
+		return nil, err
+	}
+
+	payload := bytes.Join([][]byte{
+		[]byte("M1"), []byte(msg.From), []byte(myID), x, nonceA,
+	}, nil)
+
+	if !crypto.Verify(peerPubSig, payload, sigM1) {
+		return nil, errors.New("invalid M1 signature")
+	}
+
+	state := &SessionState{
+		MyID:    myID,
+		PeerID:  msg.From,
+		PeerPub: x,
+		NonceA:  nonceA,
+	}
+
+	state.MyPriv, state.MyPub, err = crypto.GenerateEphemeralDH()
+	if err != nil {
+		return nil, err
+	}
+	state.NonceB = crypto.RandomNonce()
+
+	payload2 := bytes.Join([][]byte{
+		[]byte("M2"), []byte(myID), []byte(msg.From), state.MyPub, state.PeerPub, state.NonceA, state.NonceB,
+	}, nil)
+
+	sigM2, err := crypto.Sign(mySigPriv, payload2)
+	if err != nil {
+		return nil, err
+	}
+
+	reply := Message{
+		Type:  M2,
+		From:  myID,
+		To:    msg.From,
+		Epoch: msg.Epoch,
+		Data: map[string][]byte{
+			"Y":      state.MyPub,
+			"nonceA": state.NonceA,
+			"nonceB": state.NonceB,
+			"sig":    sigM2,
+		},
+	}
+
+	return state, sender.Send(reply)
+}
+
+// ---------------- M3: Gestione M2 lato A e Derivazione Chiave ----------------
+
+func HandleM2AsInitiator(
+	state *SessionState,
+	msg Message,
+	crypto CryptoProvider,
+	dir Directory,
+	sender MessageSender,
+	plaintext []byte, // La tua Share
+) error {
+
+	peerPubSig, err := dir.GetPublicKey(msg.From)
+	if err != nil {
+		return err
+	}
+
+	y, err := getBytes(msg.Data, "Y")
+	if err != nil {
+		return err
+	}
+	nonceA_rec, err := getBytes(msg.Data, "nonceA")
+	if err != nil {
+		return err
+	}
+	nonceB, err := getBytes(msg.Data, "nonceB")
+	if err != nil {
+		return err
+	}
+	sigM2, err := getBytes(msg.Data, "sig")
+	if err != nil {
+		return err
+	}
+
+	// CRITICO: Controllo Anti-Replay
+	if !bytes.Equal(nonceA_rec, state.NonceA) {
+		return errors.New("security alert: nonceA mismatch! Possible replay attack")
+	}
+
+	payload := bytes.Join([][]byte{
+		[]byte("M2"), []byte(msg.From), []byte(state.MyID), y, state.MyPub, nonceA_rec, nonceB,
+	}, nil)
+
+	if !crypto.Verify(peerPubSig, payload, sigM2) {
+		return errors.New("invalid M2 signature")
+	}
+
+	state.PeerPub = y
+	state.NonceB = nonceB
+
+	shared, err := crypto.ComputeSharedSecret(state.MyPriv, state.PeerPub)
+	if err != nil {
+		return err
+	}
+
+	tr := bytes.Join([][]byte{
+		[]byte(state.MyID), []byte(state.PeerID), state.MyPub, state.PeerPub, state.NonceA, state.NonceB,
+	}, nil)
+	state.Transcript = crypto.Hash(tr)
+
+	state.SharedKey, err = crypto.DeriveKey(shared, state.Transcript)
+	if err != nil {
+		return err
+	}
+
+	ct, nonceAEAD, err := crypto.Encrypt(state.SharedKey, plaintext, state.Transcript)
+	if err != nil {
+		return err
+	}
+
+	msg3 := Message{
+		Type:  M3,
+		From:  state.MyID,
+		To:    state.PeerID,
+		Epoch: msg.Epoch,
+		Data: map[string][]byte{
+			"ct":    ct,
+			"nonce": nonceAEAD,
+		},
+	}
+
+	return sender.Send(msg3)
+}
+
+// ---------------- Gestione M3 lato B (Decifrazione) ----------------
+
+func HandleM3(
+	state *SessionState,
+	msg Message,
+	crypto CryptoProvider,
+) ([]byte, error) {
+
+	ct, err := getBytes(msg.Data, "ct")
+	if err != nil {
+		return nil, err
+	}
+	nonceAEAD, err := getBytes(msg.Data, "nonce")
+	if err != nil {
+		return nil, err
+	}
+
+	shared, err := crypto.ComputeSharedSecret(state.MyPriv, state.PeerPub)
+	if err != nil {
+		return nil, err
+	}
+
+	// Stesso ordine esatto di A per il transcript
+	tr := bytes.Join([][]byte{
+		[]byte(state.PeerID), []byte(state.MyID), state.PeerPub, state.MyPub, state.NonceA, state.NonceB,
+	}, nil)
+	state.Transcript = crypto.Hash(tr)
+
+	state.SharedKey, err = crypto.DeriveKey(shared, state.Transcript)
+	if err != nil {
+		return nil, err
+	}
+
+	return crypto.Decrypt(state.SharedKey, nonceAEAD, ct, state.Transcript)
+}
+
+===== FILE: ./internal/keyexchange/interfaces.go =====
+package keyexchange
+
+// --- CRYPTO INTERFACES ---
+
+type CryptoProvider interface {
+	GenerateEphemeralDH() (priv, pub []byte, err error)
+	ComputeSharedSecret(priv, peerPub []byte) ([]byte, error)
+
+	Sign(privSigKey []byte, msg []byte) ([]byte, error)
+	Verify(pubSigKey []byte, msg []byte, sig []byte) bool
+
+	DeriveKey(sharedSecret, transcript []byte) ([]byte, error)
+
+	Encrypt(key, plaintext, aad []byte) (ciphertext, nonce []byte, err error)
+	Decrypt(key, nonce, ciphertext, aad []byte) ([]byte, error)
+
+	RandomNonce() []byte
+	Hash(data []byte) []byte
+}
+
+// --- SERVER INTERFACE ---
+
+type Directory interface {
+	GetPublicKey(userID string) ([]byte, error)
+	GetEpoch() uint64
+}
+
+type MessageSender interface {
+	Send(msg Message) error
+}
+
+===== FILE: ./internal/keyexchange/messages.go =====
+package keyexchange
+
+type MessageType string
+
+const (
+	M1 MessageType = "M1"
+	M2 MessageType = "M2"
+	M3 MessageType = "M3"
+)
+
+type Message struct {
+	Type  MessageType       `json:"type"`
+	From  string            `json:"from"`
+	To    string            `json:"to"`
+	Epoch uint64            `json:"epoch"`
+	Data  map[string][]byte `json:"data"`
+}
+
+===== FILE: ./internal/store/json_store.go =====
+// Technically, there could be some race conditions when editing data about files
+// Realistically this will not happen since this is a demo
+// Do we care?
+
+package store
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"threshold-recovery/internal/core"
+	"time"
+)
+
+// The JSONStore is simply a path to a directory
+type JSONStore struct {
+	DataDir     string
+	HMACSecret  []byte
+	PKeyIDDBDir string
+}
+
+type ParticipantDirectory struct {
+	Epoch        uint64                        `json:"epoch"`
+	Participants map[string]*core.Participant `json:"participants"`
+}
+
+func NewJSONStore(dir, secret string) *JSONStore {
+	return &JSONStore{
+		DataDir:    dir,
+		HMACSecret: []byte(secret),
+	}
+}
+
+func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
+	h := hmac.New(sha256.New, s.HMACSecret)
+
+	// Must bind slot to both wallet and friend otherwise same friends would have same slot in different wallets
+	h.Write(walletPubKey)
+	h.Write(friendPubKey)
+
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// This take a wallet name and finds the corresponding file on local storage
+func (s *JSONStore) GetWallet(pubKey []byte) (*core.Wallet, error) {
+	// fmt.Printf("[GetWallet] pubkey: %v\n", pubKey)
+	id := s.deriveID(pubKey)
+	// fmt.Printf("[GetWallet] id (derived): %v\n", id)
+	path := filepath.Join(s.DataDir, id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var w core.Wallet
+	// Funky name for a function that parses JSON, it also appears to use some base64 magic
+	err = json.Unmarshal(data, &w)
+	return &w, err
+}
+
+// Creates a new wallet to local storage
+func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
+	w.ID = s.deriveID(w.PublicKey)
+
+	path := filepath.Join(s.DataDir, w.ID+".json")
+
+	// Check if file exists
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("wallet for this public key already exists")
+	}
+	return s.save(w)
+}
+
+// Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
+func (s *JSONStore) UpdateLiveness(pubKey []byte) error {
+	w, err := s.GetWallet(pubKey)
+	if err != nil {
+		return err
+	}
+	w.LastActivity = time.Now()
+	return s.save(w)
+}
+
+// Private helper to write files
+func (s *JSONStore) save(w *core.Wallet) error {
+	data, err := json.MarshalIndent(w, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(s.DataDir, w.ID+".json")
+	return os.WriteFile(path, data, 0600)
+}
+
+// Deterministically derive a Public key into a storage ID
+func (s *JSONStore) deriveID(pubKey []byte) string {
+	h := hmac.New(sha256.New, s.HMACSecret)
+	h.Write(pubKey)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
+	path := filepath.Join(s.DataDir, "participants.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &ParticipantDirectory{
+				Epoch: 0, // TODO: ma un int
+				Participants: make(map[string]*core.Participant),
+			}, nil
+		}
+		return nil, err
+	}
+
+	var dir ParticipantDirectory
+	if err := json.Unmarshal(data, &dir); err != nil {
+		return nil, err
+	}
+	return &dir, nil
+}
+
+// Creates a new "registered user"
+func (s *JSONStore) SaveParticipant(p *core.Participant) error {
+	dir, err := s.loadDirectory()
+	if err != nil {
+		return err
+	}
+
+	if _, exists := dir.Participants[p.ID]; exists {
+		return fmt.Errorf("participant ID '%s' is taken", p.ID)
+	}
+
+	dir.Participants[p.ID] = p
+	dir.Epoch++
+
+	data, err := json.MarshalIndent(dir, "", "  ")
+	if err != nil {
+		return nil
+	}
+
+	path := filepath.Join(s.DataDir, "participants.json")
+	return os.WriteFile(path, data, 0600)
+}
+
+// Retrieves a "registered user"
+func (s *JSONStore) GetParticipant(id string) (*core.Participant, uint64, error) {
+	dir, err := s.loadDirectory()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	p, exists := dir.Participants[id]
+	if !exists {
+		return nil, dir.Epoch, fmt.Errorf("participant not found")
+	}
+
+	return p, dir.Epoch, nil
+}
+
+===== FILE: ./internal/crypto/protocol_sign.go =====
+package crypto
+
+import (
+	"errors"
+)
+
+// ProtocolSignSessionBound runs an end-to-end threshold Schnorr signing protocol
+// with commit/reveal, entirely in memory (no networking).
+//
+// Inputs:
+// - ctx, sess: curve context + session (sess binds challenge to this session/group)
+// - msg: message to sign
+// - P: master public key (for Feldman VSS this is typically comms[0].Point)
+// - signers: indices of participants who will sign (must be unique)
+// - shares: map[index]Share (each signer must have its share)
+// Output:
+// - aggregated signature (R,z), plus a final verification check.
+//
+// This function is useful as a reference implementation and for testing.
+// In a real distributed deployment, you would replace the in-memory maps
+// with message passing (broadcast + collection) between participants.
+func ProtocolSignSessionBound(
+	ctx *CurveCtx,
+	sess *Session,
+	msg []byte,
+	P []byte,
+	signers []int,
+	shares map[int]Share,
+) (Signature, error) {
+	if ctx == nil || sess == nil {
+		return Signature{}, errors.New("nil ctx/session")
+	}
+
+	// Normalize signer set (sorted + unique)
+	ids, err := NormalizeIndices(signers)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// -------------------------
+	// Round 1: Nonce commit
+	// -------------------------
+	nonces := make(map[int]*NonceShare, len(ids))
+	commits := make(map[int][]byte, len(ids)) // in the real protocol this is broadcasted
+
+	for _, i := range ids {
+		// each signer must have a share
+		if _, ok := shares[i]; !ok {
+			return Signature{}, errors.New("missing share for signer")
+		}
+
+		ns, err := NewNonceShare(ctx, sess, i)
+		if err != nil {
+			return Signature{}, err
+		}
+		nonces[i] = ns
+		commits[i] = ns.Commit()
+	}
+
+	// -------------------------
+	// Round 2: Reveal Ri
+	// -------------------------
+	reveals := make(map[int][]byte, len(ids))
+	for _, i := range ids {
+		reveals[i] = nonces[i].Reveal() // it would be a broadcast of the point
+	}
+
+	// Verify all reveals match the commits and are valid points
+	for _, i := range ids {
+		if !VerifyNonce(ctx, sess, i, commits[i], reveals[i]) {
+			return Signature{}, errors.New("nonce verification failed")
+		}
+	}
+
+	// Compute aggregated R = Σ Ri
+	R, err := CombineRStrict(ctx, reveals, ids)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// Compute challenge e (session-bound)
+	e, err := ChallengeSessionBound(ctx, sess, R, P, msg)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// Lagrange coefficients for this signer set
+	lambdas, err := LagrangeCoefficients(ctx, ids)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// -------------------------
+	// Round 3: Partial signatures z_i
+	// -------------------------
+	partials := make(map[int][]byte, len(ids))
+	for _, i := range ids {
+		zi, err := PartialSignStrict(ctx, shares[i], nonces[i], lambdas[i], e)
+		if err != nil {
+			return Signature{}, err
+		}
+		partials[i] = zi
+	}
+
+	// -------------------------
+	// Final aggregation
+	// -------------------------
+	sig, err := CombineSignatureStrict(ctx, R, partials, ids)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// Sanity check: verify final signature
+	// in rete reale, il combiner vuole essere certo prima di “pubblicare” la firma
+	if !VerifySignatureSessionBound(ctx, sess, P, msg, sig) {
+		return Signature{}, errors.New("final signature verification failed")
+	}
+
+	return sig, nil
+}
+
+// -----------------------------------------------------------------------------
+// NOTE FOR DISTRIBUTED IMPLEMENTATION (IMPORTANT)
+//
+// This function implements the *logical* threshold Schnorr signing protocol
+// entirely in memory. All maps (commits, reveals, partials) simulate messages
+// that, in a real distributed deployment, MUST be exchanged via the network.
+//
+// To convert this reference implementation into a real distributed protocol,
+// the following message flow is required:
+//
+// ROUND 1 — Nonce commit (broadcast):
+//   - Each participant i locally generates a nonce share (r_i, R_i = r_i*G).
+//   - Each participant broadcasts ONLY the commitment c_i = H(session || i || R_i).
+//   - No R_i values are revealed at this stage.
+//
+// ROUND 2 — Nonce reveal (broadcast + verification):
+//   - After collecting all commitments c_i, each participant broadcasts R_i.
+//   - Upon receiving R_i from participant i, every participant MUST:
+//       * verify that H(session || i || R_i) == c_i
+//       * verify that R_i is a valid point on the curve
+//   - If any verification fails, the protocol MUST abort.
+//   - After successful verification, all participants compute the same
+//     aggregated nonce R = Σ R_i.
+//
+// ROUND 3 — Challenge computation (local, deterministic):
+//   - Each participant computes the challenge
+//       e = H(R || P || msg || session.ID || session.IndexHash) mod N
+//   - No messages are exchanged in this step.
+//   - Determinism is critical: all participants must compute the same e.
+//
+// ROUND 4 — Partial signature (unicast or broadcast):
+//   - Each participant i computes its partial signature
+//       z_i = r_i + e * lambda_i * s_i mod N
+//   - Each participant sends z_i to the designated combiner
+//     (or broadcasts it to all, depending on the architecture).
+//
+// FINAL STEP — Signature aggregation and verification:
+//   - The combiner collects all z_i values and computes
+//       z = Σ z_i mod N
+//   - The final Schnorr signature is (R, z).
+//   - The final signature MUST be verified before being released.
+//
+// IMPORTANT SECURITY NOTES:
+//   - Commit–reveal is mandatory: revealing R_i without a prior commitment
+//     allows adaptive attacks on the nonce.
+//   - Nonces r_i MUST NEVER be reused across signing sessions.
+//   - All participants must agree on the exact signer set (IndexHash).
+//   - Any failure in verification (nonce, partial signature, final signature)
+//     MUST cause the protocol to abort.
+//
+// This in-memory implementation exists as a reference and test oracle.
+// Any distributed version must preserve the exact round structure above.
+// -----------------------------------------------------------------------------
+
+// Altro commento: tutto quello che viene mandato nel canale (ci, ecc...) dovrà
+// essere protetto. Non so se con cifratura, mac o firme digitali,
+// ci devo pensare, ma nella pratica non può essere mandato in chiaro.
+// Non perchè vengano rivelati segreti, il protocollo è matematicamente sicuro,
+// ma piuttosto per i soliti attacchi (MITM,...) :) poi a questo ci pensiamo
+
+===== FILE: ./internal/crypto/provider.go =====
+package crypto
+
+import (
+	"crypto/ecdh"    // BINGO! Addio crypto/elliptic
+	"crypto/ed25519" // Per le firme
+	"crypto/hkdf"    // Per la KDF
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+
+	"golang.org/x/crypto/chacha20poly1305" // Per la cifratrua simmetrica
+)
+
+// DefaultProvider non ha più bisogno del CurveCtx. X25519 è lo standard.
+type DefaultProvider struct{}
+
+func NewDefaultProvider() *DefaultProvider {
+	return &DefaultProvider{}
+}
+
+// Generazione chiavi effimere per ECDH x25519
+func (p *DefaultProvider) GenerateEphemeralDH() ([]byte, []byte, error) {
+	// Generiamo una chiave privata effimera su curva X25519
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Restituiamo i byte crudi (32 byte per la privata, 32 per la pubblica)
+	return priv.Bytes(), priv.PublicKey().Bytes(), nil
+}
+
+func (p *DefaultProvider) ComputeSharedSecret(privBytes, peerPubBytes []byte) ([]byte, error) {
+	// Ricostruiamo la nostra chiave privata
+	priv, err := ecdh.X25519().NewPrivateKey(privBytes)
+	if err != nil {
+		return nil, errors.New("invalid private key bytes")
+	}
+
+	// Ricostruiamo la chiave pubblica del peer e ne verifichiamo il formato base.
+	peerPub, err := ecdh.X25519().NewPublicKey(peerPubBytes)
+	if err != nil {
+		return nil, errors.New("invalid peer public key")
+	}
+
+	// ECDH puro, sicuro e testato
+	return priv.ECDH(peerPub)
+}
+
+// firme: ed25519
+func (p *DefaultProvider) Sign(privSigKey []byte, msg []byte) ([]byte, error) {
+	if len(privSigKey) != ed25519.PrivateKeySize {
+		return nil, errors.New("invalid ed25519 private key size")
+	}
+	return ed25519.Sign(privSigKey, msg), nil
+}
+
+func (p *DefaultProvider) Verify(pubSigKey []byte, msg []byte, sig []byte) bool {
+	if len(pubSigKey) != ed25519.PublicKeySize {
+		return false
+	}
+	return ed25519.Verify(pubSigKey, msg, sig)
+}
+
+// KDF (HKDF-SHA256)
+
+func (p *DefaultProvider) DeriveKey(sharedSecret, transcript []byte) ([]byte, error) {
+	return hkdf.Key(sha256.New, sharedSecret, transcript, "share-transfer-v1", 32)
+}
+
+// AEAD (XChaCha20-Poly1305)
+
+func (p *DefaultProvider) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, error) {
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	nonce := make([]byte, aead.NonceSize())
+	rand.Read(nonce)
+	ct := aead.Seal(nil, nonce, plaintext, aad)
+	return ct, nonce, nil
+}
+
+func (p *DefaultProvider) Decrypt(key, nonce, ciphertext, aad []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	return aead.Open(nil, nonce, ciphertext, aad)
+}
+
+// Utils
+
+func (p *DefaultProvider) RandomNonce() []byte {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return b
+}
+
+func (p *DefaultProvider) Hash(data []byte) []byte {
+	h := sha256.Sum256(data)
+	return h[:]
+}
+
+===== FILE: ./internal/crypto/types.go =====
+package crypto
+
+import (
+	"crypto/elliptic"
+	"errors"
+	"math/big"
+)
+
+// Share represents a Shamir secret share (i, s_i).
+type Share struct {
+	Index int    `json:"index"`
+	Value []byte `json:"value"` // scalar, fixed length
+}
+
+// Commitment is a Feldman commitment C_j = a_j * G.
+type Commitment struct {
+	Point []byte `json:"point"`
+}
+
+// Signature is a standard Schnorr signature (R, z).
+type Signature struct {
+	R []byte `json:"R"` // uncompressed EC point
+	Z []byte `json:"z"` // scalar
+}
+
+// CurveCtx bundles curve parameters.
+type CurveCtx struct {
+	Curve elliptic.Curve
+	N     *big.Int
+}
+
+// NewCurveCtx returns a P-256 context.
+func NewCurveCtx() *CurveCtx {
+	c := elliptic.P256()
+	return &CurveCtx{
+		Curve: c,
+		N:     new(big.Int).Set(c.Params().N),
+	}
+}
+
+// ScalarFromBytes parses a scalar mod N.
+func (c *CurveCtx) ScalarFromBytes(b []byte) (*big.Int, error) {
+	if len(b) == 0 {
+		return nil, errors.New("empty scalar")
+	}
+	x := new(big.Int).SetBytes(b)
+	x.Mod(x, c.N)
+	if x.Sign() == 0 {
+		return nil, errors.New("scalar is zero mod N")
+	}
+	return x, nil
+}
+
+// ScalarToBytes serializes a scalar to fixed 32 bytes.
+func (c *CurveCtx) ScalarToFixedBytes(x *big.Int) ([]byte, error) {
+	if x == nil {
+		return nil, errors.New("nil scalar")
+	}
+
+	if x.Sign() < 0 {
+		return nil, errors.New("negative scalar")
+	}
+
+	// scalari devono stare in [1, N-1]
+	if x.Cmp(c.N) >= 0 { // because >= is not accepted for BigInt
+		return nil, errors.New("scalar >= group order")
+	}
+
+	out := make([]byte, 32) // creating a slice of 32 bytes made of zeros
+	xb := x.Bytes()
+
+	if len(xb) > len(out) {
+		return nil, errors.New("scalar too large to encode")
+	}
+
+	copy(out[len(out)-len(xb):], xb) // padding with zeros (in the first places)
+	return out, nil
+}
+
+===== FILE: ./internal/crypto/threshold_schnorr.go =====
+package crypto
+
+import (
+	"crypto/elliptic"
+	"crypto/sha256"
+	"errors"
+	"math/big"
+	"sort"
+)
+
+// ============================
+// Helpers: indices / validation
+// ============================
+
+// NormalizeIndices returns a sorted copy of indices and ensures they are unique and non-empty.
+func NormalizeIndices(indices []int) ([]int, error) {
+	if len(indices) == 0 {
+		return nil, errors.New("empty index set")
+	}
+	cp := append([]int(nil), indices...)
+	sort.Ints(cp) // in order to sort the list
+	for i := 1; i < len(cp); i++ {
+		if cp[i] == cp[i-1] {
+			return nil, errors.New("duplicate index in set") // if there are two equals indexes (ow the denominator of lagrange could be zero)
+		}
+	}
+	return cp, nil
+}
+
+// ValidatePointBytes checks that b is an uncompressed EC point on the given curve.
+// For P-256 this is 65 bytes: 0x04 || X(32) || Y(32).
+func ValidatePointBytes(curve elliptic.Curve, b []byte) (*big.Int, *big.Int, error) {
+	if curve == nil {
+		return nil, nil, errors.New("nil curve")
+	}
+
+	pLen := 1 + 2*((curve.Params().BitSize+7)/8)
+	if len(b) != pLen || b[0] != 4 {
+		return nil, nil, errors.New("invalid point encoding")
+	}
+
+	x, y := elliptic.Unmarshal(curve, b)
+	if x == nil || y == nil {
+		return nil, nil, errors.New("invalid point (unmarshal failed)")
+	}
+	if !curve.IsOnCurve(x, y) {
+		return nil, nil, errors.New("point not on curve")
+	}
+
+	return x, y, nil
+}
+
+// ============================
+// Challenge functions
+// ============================
+
+// ChallengeStandard computes e = H(R || P || msg) mod N.
+func ChallengeStandard(ctx *CurveCtx, R, P, msg []byte) (*big.Int, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+	h := sha256.New()
+	h.Write(R)
+	h.Write(P)
+	h.Write(msg)
+
+	e := new(big.Int).SetBytes(h.Sum(nil))
+	e.Mod(e, ctx.N)
+	if e.Sign() == 0 {
+		// Optional hardening: reject e=0
+		return nil, errors.New("challenge is zero")
+	}
+	return e, nil
+}
+
+// ChallengeSessionBound computes e = H(R || P || msg || sess.ID || sess.IndexHash) mod N.
+func ChallengeSessionBound(ctx *CurveCtx, sess *Session, R, P, msg []byte) (*big.Int, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+	if sess == nil || len(sess.ID) == 0 || len(sess.IndexHash) == 0 {
+		return nil, errors.New("nil/invalid session")
+	}
+
+	h := sha256.New()
+	h.Write(R)
+	h.Write(P)
+	h.Write(msg)
+	h.Write(sess.ID)
+	h.Write(sess.IndexHash)
+
+	e := new(big.Int).SetBytes(h.Sum(nil))
+	e.Mod(e, ctx.N)
+	if e.Sign() == 0 {
+		// Optional hardening: reject e=0
+		return nil, errors.New("challenge is zero")
+	}
+	return e, nil
+}
+
+// ============================
+// Lagrange coefficients
+// ============================
+
+// LagrangeCoefficients returns lambda_i for reconstruction at x=0 using the given indices.
+func LagrangeCoefficients(ctx *CurveCtx, indices []int) (map[int]*big.Int, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+
+	ids, err := NormalizeIndices(indices) // in order to normalize the list of indices (ex to cancel duplicates)
+	if err != nil {
+		return nil, err
+	}
+
+	l := make(map[int]*big.Int, len(ids))
+	for _, i := range ids {
+		num := big.NewInt(1)
+		den := big.NewInt(1)
+
+		// lambda_i = Π_{j!=i} (-j)/(i-j) mod N
+		for _, j := range ids {
+			if i == j {
+				continue
+			}
+			num = modMul(num, big.NewInt(int64(-j)), ctx.N)
+			den = modMul(den, big.NewInt(int64(i-j)), ctx.N)
+		}
+
+		denInv := new(big.Int).ModInverse(den, ctx.N)
+		if denInv == nil {
+			return nil, errors.New("non-invertible denominator (bad indices?)")
+		}
+		l[i] = modMul(num, denInv, ctx.N)
+	}
+
+	return l, nil
+}
+
+// ============================
+// Combine R
+// ============================
+
+// CombineRStrict sums R_i for all signers and returns R = Σ R_i, with validation.
+func CombineRStrict(ctx *CurveCtx, reveals map[int][]byte, signers []int) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+
+	ids, err := NormalizeIndices(signers)
+	if err != nil {
+		return nil, err
+	}
+
+	var rx, ry *big.Int
+	for _, i := range ids {
+		Ri, ok := reveals[i]
+		if !ok {
+			return nil, errors.New("missing reveal for signer")
+		}
+
+		x, y, err := ValidatePointBytes(ctx.Curve, Ri)
+		if err != nil {
+			return nil, err
+		}
+
+		if rx == nil {
+			rx, ry = x, y
+		} else {
+			rx, ry = ctx.Curve.Add(rx, ry, x, y)
+
+			// Hardening: some implementations may return (nil,nil) for the point at infinity
+			// or for invalid intermediate states (defensive check).
+			if rx == nil || ry == nil {
+				return nil, errors.New("invalid aggregated R (point at infinity)")
+			}
+			if !ctx.Curve.IsOnCurve(rx, ry) {
+				return nil, errors.New("invalid aggregated R (not on curve)")
+			}
+		}
+	}
+
+	// Defensive final check
+	if rx == nil || ry == nil {
+		return nil, errors.New("invalid aggregated R")
+	}
+
+	return elliptic.Marshal(ctx.Curve, rx, ry), nil
+}
+
+// ============================
+// Partial signature
+// ============================
+
+// PartialSignStrict computes z_i = r_i + e*lambda_i*s_i mod N, returned as fixed 32-byte scalar.
+// Requires sh.Index == ns.Index and uses ctx.ScalarFromBytes / ctx.ScalarToFixedBytes for consistency.
+func PartialSignStrict(ctx *CurveCtx, sh Share, ns *NonceShare, lambda, e *big.Int) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("nil ctx")
+	}
+	if ns == nil {
+		return nil, errors.New("nil nonce share")
+	}
+	if sh.Index != ns.Index {
+		return nil, errors.New("index mismatch")
+	}
+	if lambda == nil || e == nil {
+		return nil, errors.New("nil lambda or challenge")
+	}
+
+	// Parse s_i and reject zero.
+	si, err := ctx.ScalarFromBytes(sh.Value)
+	if err != nil {
+		return nil, err
+	}
+
+	// z_i = r_i + e*lambda*s_i mod N
+	term := modMul(modMul(e, lambda, ctx.N), si, ctx.N)
+	z := modAdd(ns.ri, term, ctx.N)
+
+	return ctx.ScalarToFixedBytes(z)
+}
+
+// ============================
+// Combine signature
+// ============================
+
+// CombineSignatureStrict sums partial signatures z_i for signers and returns (R, z).
+func CombineSignatureStrict(ctx *CurveCtx, R []byte, partials map[int][]byte, signers []int) (Signature, error) {
+	if ctx == nil {
+		return Signature{}, errors.New("nil ctx")
+	}
+
+	ids, err := NormalizeIndices(signers)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	// Validate R
+	if _, _, err := ValidatePointBytes(ctx.Curve, R); err != nil {
+		return Signature{}, err
+	}
+
+	z := big.NewInt(0)
+	for _, i := range ids {
+		ziBytes, ok := partials[i]
+		if !ok {
+			return Signature{}, errors.New("missing partial signature for signer")
+		}
+
+		// Accept any scalar mod N (reject zero to be strict; you can loosen if needed)
+		zi, err := ctx.ScalarFromBytes(ziBytes)
+		if err != nil {
+			return Signature{}, err
+		}
+
+		z = modAdd(z, zi, ctx.N)
+	}
+
+	if z.Sign() == 0 {
+		return Signature{}, errors.New("invalid signature scalar (z = 0)")
+	}
+
+	zb, err := ctx.ScalarToFixedBytes(z)
+	if err != nil {
+		return Signature{}, err
+	}
+
+	return Signature{R: R, Z: zb}, nil
+}
+
+// ============================
+// Verify signature
+// ============================
+
+// VerifySignatureStandard verifies zG = R + eP where e = H(R||P||msg) (for challenge standard)
+func VerifySignatureStandard(ctx *CurveCtx, P, msg []byte, sig Signature) bool {
+	if ctx == nil {
+		return false
+	}
+
+	Rx, Ry, err := ValidatePointBytes(ctx.Curve, sig.R)
+	if err != nil {
+		return false
+	}
+	Px, Py, err := ValidatePointBytes(ctx.Curve, P)
+	if err != nil {
+		return false
+	}
+
+	z, err := ctx.ScalarFromBytes(sig.Z)
+	if err != nil {
+		return false
+	}
+	zb, err := ctx.ScalarToFixedBytes(z)
+	if err != nil {
+		return false
+	}
+
+	e, err := ChallengeStandard(ctx, sig.R, P, msg)
+	if err != nil {
+		return false
+	}
+
+	// LHS: z*G
+	lx, ly := ctx.Curve.ScalarBaseMult(zb)
+
+	// RHS: R + e*P
+	eb, err := ctx.ScalarToFixedBytes(e)
+	if err != nil {
+		// errore interno / violazione delle assunzioni
+		return false
+	}
+
+	ex, ey := ctx.Curve.ScalarMult(Px, Py, eb)
+	rx, ry := ctx.Curve.Add(Rx, Ry, ex, ey)
+
+	return lx.Cmp(rx) == 0 && ly.Cmp(ry) == 0
+}
+
+// VerifySignatureSessionBound verifies zG = R + eP where e = H(R||P||msg||sess.ID||sess.IndexHash).
+func VerifySignatureSessionBound(ctx *CurveCtx, sess *Session, P, msg []byte, sig Signature) bool {
+	if ctx == nil || sess == nil {
+		return false
+	}
+
+	Rx, Ry, err := ValidatePointBytes(ctx.Curve, sig.R)
+	if err != nil {
+		return false
+	}
+	Px, Py, err := ValidatePointBytes(ctx.Curve, P)
+	if err != nil {
+		return false
+	}
+
+	z, err := ctx.ScalarFromBytes(sig.Z)
+	if err != nil {
+		return false
+	}
+	zb, err := ctx.ScalarToFixedBytes(z)
+	if err != nil {
+		return false
+	}
+
+	e, err := ChallengeSessionBound(ctx, sess, sig.R, P, msg)
+	if err != nil {
+		return false
+	}
+
+	// LHS: z*G
+	lx, ly := ctx.Curve.ScalarBaseMult(zb)
+
+	// RHS: R + e*P
+	eb, err := ctx.ScalarToFixedBytes(e)
+	if err != nil {
+		// errore interno / violazione delle assunzioni
+		return false
+	}
+
+	ex, ey := ctx.Curve.ScalarMult(Px, Py, eb)
+	rx, ry := ctx.Curve.Add(Rx, Ry, ex, ey)
+
+	return lx.Cmp(rx) == 0 && ly.Cmp(ry) == 0
+}
+
+===== FILE: ./internal/crypto/vss_feldman.go =====
+package crypto
+
+import (
+	"crypto/elliptic"
+	"errors"
+	"math/big"
+)
+
+// SplitVSS splits a secret using Shamir and produces Feldman commitments.
+func SplitVSS(ctx *CurveCtx, secret []byte, n, k int) ([]Share, []Commitment, error) {
+	if k < 2 || n < k {
+		return nil, nil, errors.New("invalid (n,k)")
+	}
+
+	//creation of the secret s (a0)
+	s, err := ctx.ScalarFromBytes(secret)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Polynomial coefficients
+	coeffs := make([]*big.Int, k)
+	coeffs[0] = s
+	for j := 1; j < k; j++ {
+		coeffs[j], err = randScalar(ctx.N) // random coefficients a1,...ak-1
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Commitments
+	comms := make([]Commitment, k)
+	for j := range k {
+		x, y := ctx.Curve.ScalarBaseMult(coeffs[j].Bytes()) // (x,y) = aj*G (G=Base Point)
+		comms[j] = Commitment{
+			Point: elliptic.Marshal(ctx.Curve, x, y),
+		}
+	}
+
+	// Shares
+	shares := make([]Share, n)
+	for i := 1; i <= n; i++ {
+		y := coeffs[0]
+
+		// Evaluate Shamir polynomial at x = i
+		for j := 1; j < k; j++ {
+			y = modAdd(y, modMul(coeffs[j], powInt(i, j, ctx.N), ctx.N), ctx.N)
+		}
+		val, err := ctx.ScalarToFixedBytes(y)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		shares[i-1] = Share{
+			Index: i,   // i
+			Value: val, // f(i)
+		}
+
+	}
+
+	return shares, comms, nil
+}
+
+// VerifyShareFeldman checks share correctness.
+func VerifyShareFeldman(ctx *CurveCtx, sh Share, comms []Commitment) bool {
+	si := new(big.Int).SetBytes(sh.Value) // turn sh into an integer value
+	si.Mod(si, ctx.N)
+	if si.Sign() == 0 {
+		return false
+	}
+
+	// LHS
+	lx, ly := ctx.Curve.ScalarBaseMult(si.Bytes()) //(x,y) = si*G (i.e. g^si)
+
+	// RHS
+	var rx, ry *big.Int
+	for j, c := range comms {
+		cx, cy := elliptic.Unmarshal(ctx.Curve, c.Point)  // point corresponding to commitment
+		w := powInt(sh.Index, j, ctx.N)                   //i^j mod ctx.N
+		tx, ty := ctx.Curve.ScalarMult(cx, cy, w.Bytes()) // (tx,ty)=i^j(aj*G)
+		if rx == nil {
+			rx, ry = tx, ty
+		} else {
+			rx, ry = ctx.Curve.Add(rx, ry, tx, ty) // sum the poit T to the total
+		}
+	}
+
+	return lx.Cmp(rx) == 0 && ly.Cmp(ry) == 0 //LHS==RHS (si*G)==(sum aj*i^j)*G
+}
+
+===== FILE: ./internal/crypto/math.go =====
+package crypto
+
+import (
+	"crypto/rand"
+	"math/big"
+)
+
+func randScalar(N *big.Int) (*big.Int, error) {
+	for {
+		k, err := rand.Int(rand.Reader, N) // using crypto/rand, more secure than math/rand
+		if err != nil {
+			return nil, err
+		}
+		if k.Sign() != 0 {
+			return k, nil
+		}
+	}
+}
+
+func modAdd(a, b, N *big.Int) *big.Int {
+	x := new(big.Int).Add(a, b)
+	x.Mod(x, N)
+	return x
+}
+
+func modMul(a, b, N *big.Int) *big.Int {
+	x := new(big.Int).Mul(a, b)
+	x.Mod(x, N)
+	return x
+}
+
+func powInt(i, j int, N *big.Int) *big.Int {
+	return new(big.Int).Exp(
+		big.NewInt(int64(i)),
+		big.NewInt(int64(j)),
+		N,
+	)
+}
+
+===== FILE: ./internal/crypto/verifier.go =====
+package crypto
+
+type FeldmanVerifier struct {
+	Ctx *CurveCtx
+}
+
+func NewFeldmanVerifier() *FeldmanVerifier {
+	return &FeldmanVerifier{
+		Ctx: NewCurveCtx(),
+	}
+}
+
+// Uses Feldman VSS to check if the server's share matches the public polynomial commitments
+func (v *FeldmanVerifier) VerifyShare(share Share, comms []Commitment) bool {
+	return VerifyShareFeldman(v.Ctx, share, comms)
+}
+
+func (v *FeldmanVerifier) VerifySignature(pubKey []byte, message []byte, signature []byte) bool {
+	// TODO: VerifySignatureSessionBound
+	// return VerifySignatureStandard(v.Ctx, pubKey, message, signature)
+	return true
+}
+
+// Placeholder until TSS is implemented
+func (v *FeldmanVerifier) SignPartial(share Share, message []byte) ([]byte, error) {
+	return nil, nil
+}
+
+===== FILE: ./internal/crypto/nonce.go =====
+package crypto
+
+import (
+	"crypto/elliptic"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/binary"
+	"math/big"
+)
+
+type NonceShare struct {
+	Index int
+	ri    *big.Int
+	Ri    []byte
+	ci    []byte
+}
+
+// commitNonce calcola H(sess.ID || sess.IndexHash || index || Ri).
+// Include index per evitare "swap" tra partecipanti.
+// Include session ID per evitare i replay attacks
+// Include session Index per  garantire domain separation
+func commitNonce(sess *Session, index int, Ri []byte) []byte {
+	h := sha256.New()
+	h.Write(sess.ID)
+	h.Write(sess.IndexHash)
+
+	var tmp [4]byte
+	binary.BigEndian.PutUint32(tmp[:], uint32(index))
+	h.Write(tmp[:])
+
+	h.Write(Ri)
+	return h.Sum(nil)
+}
+
+func NewNonceShare(ctx *CurveCtx, sess *Session, index int) (*NonceShare, error) {
+	ri, err := randScalar(ctx.N)
+	if err != nil {
+		return nil, err
+	}
+
+	// serializzazione canonica e validazione range ([1, N-1])
+	k, err := ctx.ScalarToFixedBytes(ri)
+	if err != nil {
+		return nil, err
+	}
+
+	// Ri = ri*G
+	x, y := ctx.Curve.ScalarBaseMult(k)
+	Ri := elliptic.Marshal(ctx.Curve, x, y)
+
+	ci := commitNonce(sess, index, Ri)
+
+	return &NonceShare{
+		Index: index,
+		ri:    ri,
+		Ri:    Ri,
+		ci:    ci,
+	}, nil
+}
+
+// creates a copy of ci and returns it (the copy protects original data)
+func (n *NonceShare) Commit() []byte {
+	out := make([]byte, len(n.ci))
+	copy(out, n.ci)
+	return out
+}
+
+// creates a copy of Ri and returns it
+func (n *NonceShare) Reveal() []byte {
+	out := make([]byte, len(n.Ri))
+	copy(out, n.Ri)
+	return out
+}
+
+func VerifyNonce(ctx *CurveCtx, sess *Session, index int, commit, Ri []byte) bool {
+	// commit deve essere SHA-256
+	if len(commit) != sha256.Size {
+		return false
+	}
+
+	// Ri deve essere un punto valido sulla curva
+	x, y := elliptic.Unmarshal(ctx.Curve, Ri)
+
+	// Check nil first: Unmarshal may fail and return nil coordinates
+	if x == nil || y == nil {
+		return false
+	}
+
+	// error happens if Ri has wrong length or the first byte is not the one attended or...
+	if !ctx.Curve.IsOnCurve(x, y) {
+		return false
+	}
+
+	// ricalcola e confronta in constant-time
+	sum := commitNonce(sess, index, Ri)
+	return subtle.ConstantTimeCompare(sum, commit) == 1
+}
+
+===== FILE: ./internal/crypto/interfaces.go =====
+package crypto
+
+import "errors"
+
+var (
+	ErrInvalidShare = errors.New("share verification failed")
+	ErrInvalidSig   = errors.New("signature verification failed")
+)
+
+// This Verifier describes what the server needs to check before accepting data
+type Verifier interface {
+	// VerifySignature checks if a message was signed by the wallet's private key
+	// Used for liveness check
+	VerifySignature(pubKey []byte, message []byte, signature []byte) bool
+
+	// VerifyShare checks if a VSS share is valid against a commitment
+	// Used during registration to ensure the server isn's storing incorrect stuff
+	VerifyShare(share Share, commitment []Commitment) bool
+
+	// Takes server's share and msg to sign
+	// Returns the partial server's signature
+	SignPartial(share Share, message []byte) ([]byte, error)
+}
+
+===== FILE: ./internal/crypto/share_format.go =====
+// Is this really necessary?
+// We could just make it so we don't have to fucking marshal and unmarshal each time
+package crypto
+
+import (
+	"encoding/json"
+)
+
+// convert a Share struct (ID + value) into a byte array
+func MarshalShare(s Share) ([]byte, error) {
+	return json.Marshal(s)
+}
+
+func UnmarshalShare(data []byte) (Share, error) {
+	var s Share
+	err := json.Unmarshal(data, &s)
+	return s, err
+}
+
+===== FILE: ./internal/crypto/session.go =====
+package crypto
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"sort"
+)
+
+type Session struct {
+	ID        []byte
+	Indices   []int
+	IndexHash []byte
+}
+
+func NewSession(indices []int) (*Session, error) {
+	if len(indices) < 2 {
+		return nil, errors.New("need at least 2 participants")
+	}
+	cp := append([]int(nil), indices...) //create a copy of the slice
+	sort.Ints(cp)                        // the order doesn't matter
+
+	h := sha256.New()
+	tmp := make([]byte, 4) // buffer of 4 bytes used for every index
+	for _, i := range cp {
+		binary.BigEndian.PutUint32(tmp, uint32(i)) // example: i=1 → 00 00 00 01
+		h.Write(tmp)                               // concatenate the 4 bytes in the hashing
+	}
+
+	// creation of 32 random bytes
+	sid := make([]byte, 32)
+	if _, err := rand.Read(sid); err != nil {
+		return nil, err
+	}
+
+	return &Session{
+		ID:        sid,        // random session ID
+		Indices:   cp,         // ordered list
+		IndexHash: h.Sum(nil), // final digest (32 byte)
+	}, nil
+}
+
+===== FILE: ./internal/core/models.go =====
+package core
+
+import (
+	"crypto/ed25519"
+	"threshold-recovery/internal/crypto"
+	"time"
+)
+
+// This type represents the state of the recovery process
+
+type WalletState string
+
+// Various possible states of the wallet
+const (
+	StateActive   WalletState = "ACTIVE"
+	StateDormant  WalletState = "DORMANT"
+	StateRecovery WalletState = "RECOVERY"
+)
+
+// The user's data
+type Wallet struct {
+	ID string `json:"id"`
+	// Used in verification of liveness signatures
+	PublicKey []byte `json:"public_key"`
+
+	// Access control
+	LastActivity        time.Time     `json:"last_activity"`
+	ExpirationDate      time.Time     `json:"expiration_date"`
+	InactivityThreshold time.Duration `json:"inactivity_threshold"`
+
+	// Cryptography stuff
+	// The server's share, locked unless policy allows access
+	ServerShare crypto.Share        `json:"server_share"`
+	Commitments []crypto.Commitment `json:"commitments"`
+
+	// A sort of "mailbox" for other users
+	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share
+	FriendShares map[string][]byte `json:"friend_shares"`
+}
+
+// Returns whether the wallet is in a recoverable state
+func (w *Wallet) IsRecoverable() bool {
+	// If now > LastActivity + Threshold OR now > ExpirationDate
+	deadline := w.LastActivity.Add(w.InactivityThreshold)
+	return time.Now().After(deadline) || time.Now().After(w.ExpirationDate)
+}
+
+// Kind of like a registered user
+type Participant struct {
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
+===== FILE: ./internal/core/audit.go =====
+package core
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+type AuditEvent string
+
+const (
+	// TODO: Facciamo il loggin per bene su tutto
+	EventStatus            AuditEvent = "STATUS"
+	EventRegister          AuditEvent = "REGISTER"
+	EventLiveness          AuditEvent = "LIVENESS_UPDATE"
+	EventSignAttempt       AuditEvent = "SIGN_ATTEMPT"
+	EventSignSuccess       AuditEvent = "SIGN_SUCCESS"
+	EventSignBlocked       AuditEvent = "SIGN_BLOCKED_ACTIVE"
+	EventSharePickup       AuditEvent = "SHARE_PICKUP"
+	EventSharePickupDenied AuditEvent = "SHARE_PICKUP_DENIED"
+)
+
+// Every security log is appended to a file
+type AuditLogger struct {
+	FilePath string
+}
+
+func NewAuditLogger(path string) *AuditLogger {
+	return &AuditLogger{FilePath: path}
+}
+
+// Basically the function that logs everything
+func (l *AuditLogger) Log(walletID string, event AuditEvent, details string) {
+	entry := fmt.Sprintf("[%s] WALLET:%s EVENT:%s MSG:%s\n",
+		time.Now().Format(time.RFC3339), walletID, event, details)
+
+	// Open in append mode
+	f, err := os.OpenFile(l.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("CRITICAL: Failed to write audit log: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(entry); err != nil {
+		fmt.Printf("CRITICAL: Failed to write entry: %v\n", err)
+	}
+}
+
+===== FILE: ./internal/config/loader.go =====
+package config
+
+import (
+	"encoding/json"
+	"os"
+)
+
+// Simple struct which holds all the configurations
+type Config struct {
+	ServerPort          string `json:"server_port"`
+	DataDir             string `json:"data_dir"`
+	DefaultTimeoutHours int    `json:"default_timeout_hours"`
+	HMACSecret          string `json:"hmac_secret"`
+}
+
+// This loads the configuration JSON file and parses it into a Config var
+func Load(path string) (*Config, error) {
+	file, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var cfg Config
+	err = json.Unmarshal(file, &cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+===== FILE: ./internal/api/dto.go =====
+package api
+
+import (
+	"crypto/ed25519"
+	"threshold-recovery/internal/crypto"
+	"time"
+)
+
+// Data Transfer Objects, everything coming from the outside world
+
+type FriendShareInput struct {
+	FriendPubKey  []byte `json:"friend_public_key"`
+	EncryptedBlob []byte `json:"encrypted_blob"`
+}
+
+// The request to register a wallet
+type RegisterRequest struct {
+	PublicKey           []byte              `json:"public_key"`
+	ServerShare         crypto.Share        `json:"server_share"`
+	Commitments         []crypto.Commitment `json:"commitments"`
+	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
+	FriendShares        []FriendShareInput  `json:"friend_shares"`
+}
+
+type SharePickupRequest struct {
+	PubKey       []byte `json:"public_key"`
+	FriendPubKey []byte `json:"friend_public_key"`
+
+	// let's add some security
+	Timestamp int64  `json:"timestamp"`
+	Signature []byte `json:"signature"`
+}
+
+type SharePickupResponse struct {
+	ShareBlob []byte              `json:"share_blob"`
+	Comms     []crypto.Commitment `json:"commitments"`
+}
+
+// Liveness request is the JSON body for POST /liveness
+type LivenessRequest struct {
+	PublicKey []byte `json:"public_key"`
+	Timestamp int64  `json:"timestamp"` // Should help preventing replay attacks
+	Signature []byte `json:"signature"` // User's proof
+}
+
+// The request to the server to provide a partial signature
+type SignRequest struct {
+	PublicKey []byte `json:"public_key"`
+	Message   []byte `json:"message"`
+}
+
+type RegisterParticipantRequest struct {
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
+}
+
+type ParticipantResponse struct {
+	ID        string            `json:"id"`
+	PublicKey ed25519.PublicKey `json:"public_key"`
+	Epoch     uint64            `json:"epoch"`
+}
+
+type SignedParticipantResponse struct {
+	Data      ParticipantResponse `json:"data"`
+	Signature []byte              `json:"signature"`
+}
+
+===== FILE: ./internal/api/router.go =====
+// This is the CONTROLLER, or the handler of HTTP requests
+package api
+
+import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sync"
+	"threshold-recovery/internal/core"
+	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/keyexchange"
+	"time"
+)
+
+var (
+	inbox      = make(map[string][]keyexchange.Message)
+	inboxMutex sync.RWMutex
+)
+
+// Define what the backend can do
+// Interface to swap memory more easily
+// Every WalletService var implements the following functions implicitly
+type WalletService interface {
+	GetWallet(pubKey []byte) (*core.Wallet, error)
+	UpdateLiveness(pubKey []byte) error
+	RegisterWallet(w *core.Wallet) error
+	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
+	SaveParticipant(p *core.Participant) error
+	GetParticipant(id string) (*core.Participant, uint64, error)
+}
+
+type Handler struct {
+	Service  WalletService
+	Verifier crypto.Verifier
+	Audit    core.AuditLogger
+	PrivKey  ed25519.PrivateKey
+}
+
+func NewHandler(
+	s WalletService,
+	v crypto.Verifier,
+	a core.AuditLogger,
+	privKey ed25519.PrivateKey,
+) *Handler {
+	return &Handler{
+		Service:  s,
+		Verifier: v,
+		Audit:    a,
+		PrivKey:  privKey,
+	}
+}
+
+// Register the endpoints
+// Every specific endpoint will execute the specific handler
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /register", h.handleRegister)
+	// mux.HandleFunc("POST /liveness", h.handleLiveness)
+	mux.HandleFunc("GET /status/{id}", h.handleStatus)
+	mux.HandleFunc("POST /recover", h.handleSignRecovery)
+	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
+	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
+	mux.HandleFunc("GET /participants", h.handleGetParticipants)
+	mux.HandleFunc("POST /relay/send", h.handlePostMessage)
+	mux.HandleFunc("GET /relay/messages", h.handleGetMessages)
+}
+
+func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
+	var msg keyexchange.Message
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "Invalid message format", http.StatusBadRequest)
+		return
+	}
+
+	inboxMutex.Lock()
+	inbox[msg.To] = append(inbox[msg.To], msg)
+	inboxMutex.Unlock()
+
+	w.WriteHeader(http.StatusAccepted)
+	// TODO: remove
+	fmt.Printf("[Relay] Message %s from %s to %s stored\n", msg.Type, msg.From, msg.To)
+}
+
+func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+
+	inboxMutex.Lock()
+	msgs := inbox[userID]
+	delete(inbox, userID)
+	inboxMutex.Unlock()
+
+	if msgs == nil {
+		msgs = []keyexchange.Message{}
+	}
+
+	json.NewEncoder(w).Encode(msgs)
+}
+
+func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
+	var req SharePickupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// fmt.Printf("req.WalletID: %v\n", req.PubKey)
+
+	wallet, err := h.Service.GetWallet(req.PubKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	// Derive the slot ID from the provided friend's public key
+	slotID := h.Service.DeriveFriendSlot([]byte(wallet.PublicKey), req.FriendPubKey)
+
+	// Gatekeep is the user is not dead
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(wallet.ID, core.EventSharePickupDenied, "Slot "+slotID+" tried to pick up share too early")
+		http.Error(w, "RECOVERY LOCKED: User is still active.", http.StatusForbidden)
+		return
+	}
+
+	// Authentication will have to be here, which kind?
+	shareBlob, ok := wallet.FriendShares[slotID]
+	if !ok {
+		http.Error(w, "No share found for this ID", http.StatusNotFound)
+		return
+	}
+
+	h.Audit.Log(wallet.ID, core.EventSharePickup, "Friend "+slotID+" collected share")
+
+	resp := SharePickupResponse{
+		ShareBlob: shareBlob,
+		Comms:     wallet.Commitments,
+	}
+
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Returns the status of a specific wallet
+func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
+
+	// Decode the request
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validate the input
+	if len(req.PublicKey) == 0 {
+		http.Error(w, "Missing Public Key", http.StatusBadRequest)
+		return
+	}
+
+	// Validate Cryptography
+	if !h.Verifier.VerifyShare(req.ServerShare, req.Commitments) {
+		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
+		return
+	}
+
+	mailbox := make(map[string][]byte)
+	for _, item := range req.FriendShares {
+		slotID := h.Service.DeriveFriendSlot(req.PublicKey, item.FriendPubKey)
+		mailbox[slotID] = item.EncryptedBlob
+	}
+
+	// Map the received DTO to the model
+	wallet := &core.Wallet{
+		PublicKey:           req.PublicKey,
+		ServerShare:         req.ServerShare,
+		Commitments:         req.Commitments,
+		LastActivity:        time.Now(),
+		InactivityThreshold: req.InactivityThreshold,
+		// Default expiration = Now + Threshold
+		// TODO: change if necessary
+		ExpirationDate: time.Now().Add(req.InactivityThreshold),
+		FriendShares:   mailbox,
+	}
+
+	// Save it
+	if err := h.Service.RegisterWallet(wallet); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	h.Audit.Log(pubKeyHex, core.EventRegister, "Success")
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(`{"status":"registered"}`))
+}
+
+// É meglio che il
+func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
+	// Decode the request
+	var req LivenessRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Let's try to prevent replay attacks
+	requestTime := time.Unix(req.Timestamp, 0)
+	if time.Since(requestTime).Abs() > 5*time.Minute {
+		http.Error(w, "Invalid timestamp", http.StatusUnauthorized)
+		return
+	}
+
+	// Retrieve the wallet
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify the signature
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+	msg := fmt.Sprintf("%s:%d", pubKeyHex, req.Timestamp)
+
+	// Update Liveness
+	if err := h.Service.UpdateLiveness(req.PublicKey); err != nil {
+		http.Error(w, "Failed to update liveness", http.StatusInternalServerError)
+		return
+	}
+
+	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"liveness_updated"}`))
+}
+
+func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
+	pubKeyHex := r.PathValue("id")
+	pubKey, err := hex.DecodeString(pubKeyHex)
+	if err != nil {
+		http.Error(w, "Invalid Public Key Hex", http.StatusBadRequest)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(pubKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]any{
+		"recoverable":         wallet.IsRecoverable(),
+		"last_activity":       wallet.LastActivity,
+		"time_until_recovery": time.Until(wallet.LastActivity.Add(wallet.InactivityThreshold)).String(),
+	}
+
+	h.Audit.Log(pubKeyHex, core.EventStatus, "")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
+	var req SignRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Recover wallet
+	wallet, err := h.Service.GetWallet(req.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
+
+	// Verify if user is dead
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(pubKeyHex, core.EventSignBlocked, "Somebody tried to recover wallet while user is still alive!")
+		http.Error(w, "RECOVERY LOCKED", http.StatusForbidden)
+		return
+	}
+
+	// Here dead-man switch must have triggered
+	// Server accepts using its share
+
+	partialSig, err := h.Verifier.SignPartial(wallet.ServerShare, []byte(req.Message))
+	if err != nil {
+		h.Audit.Log(wallet.ID, core.EventSignAttempt, "")
+		http.Error(w, "Signing failed", http.StatusInternalServerError)
+		return
+	}
+
+	h.Audit.Log(wallet.ID, core.EventSignSuccess, "")
+	// Answer with partial signature
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":            "recovery_success",
+		"partial_signature": partialSig,
+	})
+}
+
+func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
+	var req RegisterParticipantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Validation
+	if req.ID == "" || len(req.PublicKey) == 0 {
+		http.Error(w, "ID or PublicKey required", http.StatusBadRequest)
+		return
+	}
+
+	p := &core.Participant{
+		ID:        req.ID,
+		PublicKey: req.PublicKey,
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.Service.SaveParticipant(p); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+	}
+
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "Missing 'id' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	p, epoch, err := h.Service.GetParticipant(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	respData := ParticipantResponse{
+		ID:        p.ID,
+		PublicKey: p.PublicKey,
+		Epoch:     epoch,
+	}
+
+	dataBytes, _ := json.Marshal(respData)
+	signature := ed25519.Sign(h.PrivKey, dataBytes)
+
+	signedResp := SignedParticipantResponse{
+		Data:      respData,
+		Signature: signature,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(signedResp)
+}
+
+===== FILE: ./cmd/client/main.go =====
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"threshold-recovery/internal/api"
+	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/keyexchange"
+	"time"
+)
+
+// Ricorda lo stato delle sessioni di handshake in corso
+var activeSessions = make(map[string]*keyexchange.SessionState)
+
+// Salva temporaneamente le share in attesa che l'handshake finisca
+var pendingShares = make(map[string][]byte)
+
+// Configuration
+const (
+	ServerURL             = "https://localhost:8443"
+	DBFile                = "client_db.json"
+	PinnedServerPubKeyHex = ""
+)
+
+// Local storage models
+type LocalDB struct {
+	MyIdentity     *Identity         `json:"my_identity"`
+	Contacts       map[string]string `json:"contacts"`
+	WatchList      map[string]string `json:"watchlist"`
+	MyWallets      map[string]string `json:"my_wallets"`
+	DirectoryEpoch uint64            `json:"directory_epoch"`
+}
+
+type Identity struct {
+	Name       string `json:"name"`
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
+}
+
+type ClientSender struct{}
+
+// Main
+func main() {
+	db := loadDB()
+	reader := bufio.NewReader(os.Stdin)
+
+	// First run
+	if db.MyIdentity == nil {
+		setupIdentity(reader, db)
+	}
+
+	startMessagePoller(db)
+
+	// Loop
+	for {
+		printMenu(db)
+		fmt.Print("\nSelect an option: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		switch input {
+		case "1":
+			showIdentity(db)
+		case "2":
+			addContact(reader, db)
+		case "3":
+			createWallet(reader, db)
+		case "4":
+			addToWatchlist(reader, db)
+		case "5":
+			checkWallets(db)
+		case "6":
+			recoverShare(reader, db)
+		case "7":
+			listCreatedWallets(db)
+		case "0":
+			fmt.Println("Goodbye.")
+			return
+		default:
+			fmt.Println("Invalid Option.")
+		}
+		fmt.Println("\nPress Enter to continue...")
+		reader.ReadString('\n')
+	}
+}
+
+func callAPI(method, path string, payload interface{}, out interface{}) error {
+	var body io.Reader
+	if payload != nil {
+		bz, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal error: %w", err)
+		}
+		body = bytes.NewBuffer(bz)
+	}
+
+	req, err := http.NewRequest(method, ServerURL+path, body)
+	if err != nil {
+		return err
+	}
+
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	// TODO: actually check certificates
+	tr := &http.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true,
+	}}
+
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: tr,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		errMsg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(errMsg))
+	}
+
+	if out != nil {
+		if w, ok := out.(io.Writer); ok {
+			defer resp.Body.Close()
+			_, err := io.Copy(w, resp.Body)
+			return err
+		}
+		defer resp.Body.Close()
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+
+	resp.Body.Close()
+	return nil
+}
+
+func startMessagePoller(db *LocalDB) {
+	ticker := time.NewTicker(3 * time.Second) // Frequenza di polling
+	go func() {
+		for range ticker.C {
+			pollRelay(db)
+		}
+	}()
+}
+
+func pollRelay(db *LocalDB) {
+	if db.MyIdentity == nil {
+		return // skippa se non registrato
+	}
+
+	var msgs []keyexchange.Message
+	err := callAPI("GET", "/relay/messages?user_id="+db.MyIdentity.Name, nil, &msgs)
+	if err != nil {
+		fmt.Printf("Failed to fetch messages from relay: %v\n", err)
+		return
+	}
+	if len(msgs) == 0 {
+		return // no messages
+	}
+
+	provider := crypto.NewDefaultProvider()
+	dir := &ClientDirectory{DB: db}
+	sender := &ClientSender{}
+	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+
+	for _, msg := range msgs {
+		fmt.Printf("\n[RELAY] Received message %s from %s\n", msg.Type, msg.From)
+
+		switch msg.Type {
+		case keyexchange.M1:
+			state, err := keyexchange.HandleM1(msg, db.MyIdentity.Name, provider, dir, sender, myPriv)
+			if err != nil {
+				fmt.Printf("[RELAY] Error: failed to handle M1 message from %s: %v\n", msg.From, err)
+				continue
+			}
+			activeSessions[msg.From] = state
+			fmt.Printf("[RELAY] Succesfully sent M2 to %s\n", msg.From)
+		case keyexchange.M2:
+			// We are dealer, friend responded
+			// retrieve the session state
+			state, ok := activeSessions[msg.From]
+			if !ok {
+				fmt.Printf("Error: no active session found for M2 from %s\n", msg.From)
+				continue
+			}
+
+			// Retrieve the pending share
+			shareBlob, ok := pendingShares[msg.From]
+			if !ok {
+				fmt.Printf("No pending share to send to %s\n", msg.From)
+				continue
+			}
+
+			// Process M2 and send M3 with share
+			err := keyexchange.HandleM2AsInitiator(state, msg, provider, dir, sender, shareBlob)
+			if err != nil {
+				fmt.Printf("Failed to handle M2 from %s: %v\n", msg.From, err)
+				continue
+			}
+
+			fmt.Printf("M2 verified. Sent M3 to %s.\n", msg.From)
+
+			delete(activeSessions, msg.From)
+			delete(pendingShares, msg.From)
+		case keyexchange.M3:
+			// We are shareholder, dealer sent us encrypted share with M3
+			state, ok := activeSessions[msg.From]
+			if !ok {
+				fmt.Printf("Non active session found for M3 from %s\n", msg.From)
+				continue
+			}
+
+			// Decrypt share
+			plaintextShare, err := keyexchange.HandleM3(state, msg, provider)
+			if err != nil {
+				fmt.Printf("Failed to decrypt M3 from %s: %v\n", msg.From, err)
+				continue
+			}
+
+			// We received the share
+			// TODO: Save?
+			fmt.Printf("Succesfully received share from %s.", msg.From)
+
+			// Temporary print
+			if len(plaintextShare) > 16 {
+				fmt.Printf("share preview: %x...\n", plaintextShare[:16])
+			}
+
+			delete(activeSessions, msg.From)
+		}
+
+		// the prompt
+		fmt.Print("\nSelect an option: ")
+	}
+}
+
+func (cs *ClientSender) Send(msg keyexchange.Message) error {
+	err := callAPI("POST", "/relay/send", msg, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send relay message: %v", err)
+	}
+	return nil
+}
+
+type ClientDirectory struct {
+	DB *LocalDB
+}
+
+func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
+	if userID == cd.DB.MyIdentity.Name {
+		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
+	}
+
+	hexKey, exists := cd.DB.Contacts[userID]
+	if !exists {
+		return nil, fmt.Errorf("user %s not found in local contacts", userID)
+	}
+
+	return hex.DecodeString(hexKey)
+}
+
+// TODO: this is a demo
+func (cd *ClientDirectory) GetEpoch() uint64 {
+	return 1
+}
+
+func createWallet(r *bufio.Reader, db *LocalDB) {
+	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
+
+	if len(db.Contacts) == 0 {
+		fmt.Println("Error: You have no contacts. Add shareholders first.")
+		return
+	}
+
+	// Get n and k
+	fmt.Print("Enter total number of shares (n): ")
+	n, err := strconv.Atoi(readInput(r))
+	if err != nil {
+		fmt.Println("Error: n must be a number >= 2.")
+		return
+	}
+
+	fmt.Print("Enter threshold (k): ")
+	k, err := strconv.Atoi(readInput(r))
+	if err != nil || k < 2 || k > n {
+		fmt.Printf("Error: k must be between 2 and %d\n", n)
+		return
+	}
+
+	// Select friends
+	fmt.Println("\nYour contacts:")
+	var names []string
+	for name := range db.Contacts {
+		names = append(names, name)
+		fmt.Printf("- %s\n", name)
+	}
+
+	fmt.Printf("Enter %d friend names, comma separated: ", n-1)
+	chosenStr := readInput(r)
+	chosenNames := strings.Split(chosenStr, ",")
+
+	var friendKeys [][]byte
+	for _, cn := range chosenNames {
+		name := strings.TrimSpace(cn)
+		keyHex, ok := db.Contacts[name]
+		if !ok {
+			fmt.Printf("Error: Contact '%s' not found.\n", name)
+			return
+		}
+		kb, _ := hex.DecodeString(keyHex)
+		friendKeys = append(friendKeys, kb)
+	}
+
+	if len(friendKeys) != n-1 {
+		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n", n-1)
+		return
+	}
+
+	// Timeout
+	fmt.Print("Enter inactivity timeout (e.g. 30s, 24h, 720h): ")
+	timeoutDur, err := time.ParseDuration(readInput(r))
+	if err != nil {
+		fmt.Println("Error: Invalid duration format. Use 's', 'm' or 'h'.")
+		return
+	}
+
+	fmt.Print("Give this wallet a local nickname: ")
+	walletName := readInput(r)
+
+	// Initialize the curve context
+	ctx := crypto.NewCurveCtx()
+	// fmt.Printf("context: %v\n", ctx)
+
+	// Generate the master secret (privKey)
+	// In a real wallet this should be derived from a seed phrase
+	// TODO: Should this actually be inputted by the user?
+	privKey, _ := rand.Int(rand.Reader, ctx.N)
+	pubKeyX, pubKeyY := ctx.Curve.ScalarBaseMult(privKey.Bytes())
+	pubKeyBytes := elliptic.Marshal(ctx.Curve, pubKeyX, pubKeyY)
+
+	shares, commitments, err := crypto.SplitVSS(ctx, privKey.Bytes(), n, k)
+	if err != nil {
+		fmt.Printf("Failed to split secret: %v", err)
+		return
+	}
+
+	serverShare := shares[0]
+	friendSharesRaw := shares[1:]
+
+	req := api.RegisterRequest{
+		PublicKey:           pubKeyBytes,
+		ServerShare:         serverShare,
+		Commitments:         commitments,
+		InactivityThreshold: timeoutDur,
+		FriendShares:        []api.FriendShareInput{}, // Vuota??
+	}
+
+	if err := callAPI("POST", "/register", req, nil); err != nil {
+		fmt.Printf("Server registration failed: %v\n", err)
+		return
+	}
+
+	provider := crypto.NewDefaultProvider()
+	dir := &ClientDirectory{DB: db}
+	sender := &ClientSender{}
+	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+
+	fmt.Println("starting key exchange...")
+
+	for i, cn := range chosenNames {
+		friendName := strings.TrimSpace(cn)
+
+		shareBlob, err := crypto.MarshalShare(friendSharesRaw[i])
+		if err != nil {
+			fmt.Printf("Marshal error for share %s: %v\n", friendName, err)
+			continue
+		}
+
+		pendingShares[friendName] = shareBlob
+
+		state, err := keyexchange.StartAsInitiator(db.MyIdentity.Name, friendName, provider, dir, sender, myPriv)
+		if err != nil {
+			fmt.Printf("Failed handshake with %s: %v\n", friendName, err)
+			continue
+		}
+
+		activeSessions[friendName] = state
+		fmt.Printf("Sent M1 messages to %s\n", friendName)
+	}
+
+	wHex := hex.EncodeToString(pubKeyBytes)
+	db.MyWallets[wHex] = walletName
+	saveDB(db)
+
+	fmt.Println("\nSUCCESS: Wallet registered on the server.")
+	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
+	fmt.Println("Handshakes succesfully initiated")
+}
+
+func checkWallets(db *LocalDB) {
+	fmt.Println("\n--- Watchlist status ---")
+	for name, keyHex := range db.WatchList {
+		var status map[string]interface{}
+		if err := callAPI("GET", "/status/"+keyHex, nil, &status); err != nil {
+			fmt.Printf("%s: [Error]\n", name)
+			continue
+		}
+
+		state := "ACTIVE"
+		if status["recoverable"].(bool) {
+			state = "DEAD (RECOVERABLE)"
+		}
+
+		fmt.Printf("%-15s | %s | Time left: %s\n", name, state, status["time_until_recovery"])
+	}
+}
+
+func recoverShare(r *bufio.Reader, db *LocalDB) {
+	fmt.Println("\n--- Recover share ---")
+	// Simplified selection logic for brevity
+	fmt.Print("Enter Wallet PubKey (Hex) to recover from: ")
+	targetHex := readInput(r)
+	targetKey, _ := hex.DecodeString(targetHex)
+	// fmt.Printf("targetHex: %v\n", targetHex)
+	myKey, _ := hex.DecodeString(db.MyIdentity.PublicKey)
+
+	req := api.SharePickupRequest{
+		PubKey:       targetKey,
+		FriendPubKey: myKey,
+	}
+
+	var binBuffer bytes.Buffer
+	if err := callAPI("POST", "/mailbox/pickup", req, &binBuffer); err != nil {
+		fmt.Printf("Pickup failed: %v\n", err)
+		return
+	}
+
+	data := binBuffer.Bytes()
+	err := os.WriteFile("recovered_share.bin", data, 0600)
+	if err != nil {
+		fmt.Println("File error: %v\n", err)
+		return
+	}
+
+	fmt.Println("Success! Share saved to recovered_share.bin")
+}
+
+func setupIdentity(r *bufio.Reader, db *LocalDB) {
+Begin:
+	fmt.Print("Choose username: ")
+	name := readInput(r)
+
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Printf("Failed to generate identity keys: %v\n", err)
+		return
+	}
+
+	db.MyIdentity = &Identity{
+		Name:       name,
+		PublicKey:  hex.EncodeToString(pubKey),
+		PrivateKey: hex.EncodeToString(privKey),
+	}
+
+	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
+	if err := callAPI("POST", "/participants", req, nil); err != nil {
+		fmt.Printf("Server registration failed: %v\n", err)
+		// goto jumpscare
+		// Però dai, nel kernel di Linux lo usano in questa maniera quindi ci sta
+		goto Begin
+	}
+	saveDB(db)
+}
+
+// Helpers
+func loadDB() *LocalDB {
+	db := &LocalDB{
+		Contacts:  make(map[string]string),
+		WatchList: make(map[string]string),
+		MyWallets: make(map[string]string),
+	}
+	data, err := os.ReadFile(DBFile)
+	if err == nil {
+		json.Unmarshal(data, db)
+	}
+	// Check if file existed but lacked map
+	if db.MyWallets == nil {
+		db.MyWallets = make(map[string]string)
+	}
+	return db
+}
+
+// Menu functions
+func printMenu(db *LocalDB) {
+	fmt.Print("\033[H\033[2J")
+	fmt.Println("==================================================================")
+	fmt.Printf(" USER: %s | CONTACTS: %d | WATCHING: %d | CREATED: %d\n",
+		db.MyIdentity.Name, len(db.Contacts), len(db.WatchList), len(db.MyWallets))
+	fmt.Println("==================================================================")
+	fmt.Println(" 1. Show My Identity (for Dealer)    5. Check Watchlist Status")
+	fmt.Println(" 2. Add a Contact                    6. Recover / Download Share")
+	fmt.Println(" 3. Create New Wallet (Dealer)       7. List My Created Wallets")
+	fmt.Println(" 4. Watch an Existing Wallet         0. Exit")
+	fmt.Println("==================================================================")
+}
+
+func showIdentity(db *LocalDB) {
+	fmt.Println("\n--- Identity ---")
+	fmt.Printf("Username:   %s\n", db.MyIdentity.Name)
+	fmt.Printf("Public Key: %s\n", db.MyIdentity.PublicKey)
+	fmt.Println("\n(Send this public key to shareholder so they can add you")
+}
+
+func addContact(r *bufio.Reader, db *LocalDB) {
+	fmt.Printf("Friend's name: ")
+	name, _ := r.ReadString('\n')
+	name = strings.TrimSpace(name)
+
+	var resp api.SignedParticipantResponse
+	err := callAPI("GET", fmt.Sprintf("/participants?id=%s", name), nil, &resp)
+	if err != nil {
+		fmt.Printf("Failed to fetch participant %s: %v", name, err)
+		return
+	}
+
+	dataBytes, _ := json.Marshal(resp.Data)
+	// TODO: pubkey del server hardcoded, la facciamo inviare dal server?
+	// Dovrebbe essere inviata con TLS quindi non dovrebbero esserci problemi.
+	serverPubKey, _ := hex.DecodeString(PinnedServerPubKeyHex)
+
+	if !ed25519.Verify(serverPubKey, dataBytes, resp.Signature) {
+		fmt.Println("Invalid server signature!")
+		return
+	}
+
+	if resp.Data.Epoch < db.DirectoryEpoch {
+		fmt.Printf("Epoch rollback")
+		return
+	}
+
+	db.DirectoryEpoch = resp.Data.Epoch
+	db.Contacts[name] = hex.EncodeToString(resp.Data.PublicKey)
+	saveDB(db)
+
+	fmt.Printf("Contact '%s' fetched and verified.\n", name)
+}
+
+func addToWatchlist(r *bufio.Reader, db *LocalDB) {
+	fmt.Print("Wallet name (e.g. 'Alice Main'): ")
+	name, _ := r.ReadString('\n')
+	name = strings.TrimSpace(name)
+
+	fmt.Print("Wallet public key (Hex): ")
+	key, _ := r.ReadString('\n')
+	key = strings.TrimSpace(key)
+
+	db.WatchList[name] = key
+	saveDB(db)
+	fmt.Println("Wallet added to watchlist.")
+}
+
+func listCreatedWallets(db *LocalDB) {
+	fmt.Println("\n--- [WALLETS YOU CREATED] ---")
+	if len(db.MyWallets) == 0 {
+		fmt.Println("No wallets created yet.")
+		return
+	}
+	for pubHex, name := range db.MyWallets {
+		fmt.Printf("NAME: %-15s | PUBKEY: %s\n", name, pubHex)
+	}
+}
+
+func readInput(r *bufio.Reader) string {
+	input, _ := r.ReadString('\n')
+	return strings.TrimSpace(input)
+}
+
+func saveDB(db *LocalDB) {
+	data, _ := json.MarshalIndent(db, "", "  ")
+	os.WriteFile(DBFile, data, 0600)
+}
+
+===== FILE: ./cmd/server/main.go =====
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"threshold-recovery/internal/api"
+	"threshold-recovery/internal/config"
+	"threshold-recovery/internal/core"
+	"threshold-recovery/internal/crypto"
+	"threshold-recovery/internal/store"
+)
+
+func main() {
+	// Load config
+	// Config is a struct in internal/config/loader.go
+	cfg, err := config.Load("./config/config.json")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Try to create the dir if it doesn't exist
+	// Do nothing if it exists
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		log.Fatal(err)
+	}
+
+	// Simple JSON storage, struct in internal/store/json_store.go
+	// Will it be good enough?
+	fileStore := store.NewJSONStore(cfg.DataDir, cfg.HMACSecret)
+
+	// Setup audit Logger
+	auditLogger := core.NewAuditLogger(filepath.Join(cfg.DataDir, "audit.log"))
+
+	// Server key infrastructure
+	keyPath := filepath.Join(cfg.DataDir, "server_identity.key")
+	var serverPriv ed25519.PrivateKey
+	var serverPub ed25519.PublicKey
+
+	// Does the key already exist?
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
+		// it does, load it
+		privBytes, err := hex.DecodeString(string(data))
+		if err != nil {
+			log.Fatalf("Error decoding: %v", err)
+		}
+
+		if len(privBytes) != ed25519.PrivateKeySize {
+			log.Fatalf("Private key not valid")
+		}
+
+		serverPriv = ed25519.PrivateKey(privBytes)
+		serverPub = serverPriv.Public().(ed25519.PublicKey)
+	} else {
+		// it does not, generate one
+		pub, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			log.Fatalf("Error key generation: %v", err)
+		}
+
+		serverPriv = priv
+		serverPub = pub
+
+		// scrivo la chiave sul file
+		err = os.WriteFile(keyPath, []byte(hex.EncodeToString(priv)), 0600)
+		if err != nil {
+			log.Fatalf("Failed to save the key: %v", err)
+		}
+	}
+
+	// TODO: bruh decidere se inviarla o hardcodarla
+	fmt.Printf("Server pubKey: %s\n", serverPub)
+
+	// Logic and API
+	// struct in internal/api/router.go
+	verifier := crypto.NewFeldmanVerifier()
+	handler := api.NewHandler(fileStore, verifier, *auditLogger, serverPriv)
+
+	// Router
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	// Start the actual server
+	// Some logging
+	log.Printf("Starting Threshold Recovery server on %s", cfg.ServerPort)
+	log.Printf("Data dir: %s", cfg.DataDir)
+
+	certFile := "./certs/server.crt"
+	keyFile := "./certs/server.key"
+
+	// Apparently port should be passed as :port, not port
+	port := cfg.ServerPort
+	if port != "" && port[0] != ':' {
+		port = ":" + port
+	}
+
+	// TODO: to change with ListenAndServeTLS
+	// As soon as ListenAndServe returns some error we exit and log a fatal error
+	if err := http.ListenAndServeTLS(port, certFile, keyFile, mux); err != nil {
+		log.Fatal(err)
+	}
+}
+

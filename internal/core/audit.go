@@ -9,6 +9,7 @@ import (
 type AuditEvent string
 
 const (
+	// TODO: Facciamo il loggin per bene su tutto
 	EventStatus            AuditEvent = "STATUS"
 	EventRegister          AuditEvent = "REGISTER"
 	EventLiveness          AuditEvent = "LIVENESS_UPDATE"
