@@ -215,8 +215,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve the wallet
-	wallet, err := h.Service.GetWallet(req.PublicKey)
-	if err != nil {
+	if _, err := h.Service.GetWallet(req.PublicKey); err != nil {
 		http.Error(w, "Wallet not found", http.StatusNotFound)
 		return
 	}
