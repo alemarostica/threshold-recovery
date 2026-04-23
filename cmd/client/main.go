@@ -407,7 +407,6 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		ServerShare:         serverShare,
 		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
-		FriendShares:        []api.FriendShareInput{}, // Vuota??
 	}
 
 	dataBytes, _ := json.Marshal(regReq)
