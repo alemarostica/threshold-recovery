@@ -23,9 +23,9 @@ var (
 // Interface to swap memory more easily
 // Every WalletService var implements the following functions implicitly
 type WalletService interface {
-	GetWallet(pubKey []byte) (*core.Wallet, error)
-	UpdateLiveness(pubKey []byte) error
-	RegisterWallet(w *core.Wallet) error
+	GetWallet(pubKey []byte, userPubKey ed25519.PublicKey) (*core.Wallet, error)
+	UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error
+	RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error
 	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
 	SaveParticipant(p *core.Participant) error
 	GetParticipant(id string) (*core.Participant, uint64, error)
@@ -56,8 +56,7 @@ func NewHandler(
 // Every specific endpoint will execute the specific handler
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.handleRegister)
-	// mux.HandleFunc("POST /liveness", h.handleLiveness)
-	mux.HandleFunc("GET /status/{id}", h.handleStatus)
+	mux.HandleFunc("POST /liveness", h.handleLiveness)
 	mux.HandleFunc("POST /recover", h.handleSignRecovery)
 	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
 	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
@@ -148,10 +147,23 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
 
 	// Decode the request
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedRegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
+	}
+
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil {
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
+		return
+	}
+
+	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		fmt.Println("Invalid request signature.")
 	}
 
 	// Validate the input
@@ -186,7 +198,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save it
-	if err := h.Service.RegisterWallet(wallet); err != nil {
+	if err := h.Service.RegisterWallet(wallet, participant.PublicKey); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -198,13 +210,25 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"registered"}`))
 }
 
-// É meglio che il
 func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	// Decode the request
-	var req LivenessRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedLivenessRequest
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
+	}
+
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil {
+		fmt.Printf("Could not retrieve participant '%s': %v\n", req.Username, err)
+		return
+	}
+
+	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
 	}
 
 	// Let's try to prevent replay attacks
@@ -214,17 +238,8 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Retrieve the wallet
-	wallet, err := h.Service.GetWallet(req.PublicKey)
-	if err != nil {
-		http.Error(w, "Wallet not found", http.StatusNotFound)
-		return
-	}
-
-	// The verification
-
 	// Update Liveness
-	if err := h.Service.UpdateLiveness(req.PublicKey); err != nil {
+	if err := h.Service.UpdateLiveness(req.PublicKey, participant.PublicKey); err != nil {
 		http.Error(w, "Failed to update liveness", http.StatusInternalServerError)
 		return
 	}
@@ -234,30 +249,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"liveness_updated"}`))
 }
 
-func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
-	pubKeyHex := r.PathValue("id")
-	pubKey, err := hex.DecodeString(pubKeyHex)
-	if err != nil {
-		http.Error(w, "Invalid Public Key Hex", http.StatusBadRequest)
-		return
-	}
-
-	wallet, err := h.Service.GetWallet(pubKey)
-	if err != nil {
-		http.Error(w, "Wallet not found", http.StatusNotFound)
-		return
-	}
-
-	response := map[string]any{
-		"recoverable":         wallet.IsRecoverable(),
-		"last_activity":       wallet.LastActivity,
-		"time_until_recovery": time.Until(wallet.LastActivity.Add(wallet.InactivityThreshold)).String(),
-	}
-
-	h.Audit.Log(pubKeyHex, core.EventStatus, "")
-	json.NewEncoder(w).Encode(response)
-}
-
+// TODO: How do we do it now that the HMAC of the wallet also has the userPubKey?
 func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 	var req SignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

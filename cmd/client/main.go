@@ -44,9 +44,9 @@ type LocalDB struct {
 }
 
 type Identity struct {
-	Name       string `json:"name"`
-	PublicKey  string `json:"public_key"`
-	PrivateKey string `json:"private_key"`
+	Name       string             `json:"name"`
+	PublicKey  ed25519.PublicKey  `json:"public_key"`
+	PrivateKey ed25519.PrivateKey `json:"private_key"`
 }
 
 type ClientSender struct{}
@@ -78,12 +78,8 @@ func main() {
 		case "3":
 			createWallet(reader, db)
 		case "4":
-			addToWatchlist(reader, db)
-		case "5":
-			checkWallets(db)
-		case "6":
 			recoverShare(reader, db)
-		case "7":
+		case "5":
 			listCreatedWallets(db)
 		case "0":
 			fmt.Println("Goodbye.")
@@ -176,7 +172,7 @@ func pollRelay(db *LocalDB) {
 	provider := crypto.NewDefaultProvider()
 	dir := &ClientDirectory{DB: db}
 	sender := &ClientSender{}
-	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+	myPriv := db.MyIdentity.PrivateKey
 
 	for _, msg := range msgs {
 		fmt.Printf("\n[RELAY] Received message %s from %s\n", msg.Type, msg.From)
@@ -249,6 +245,50 @@ func pollRelay(db *LocalDB) {
 	}
 }
 
+func startLivenessPinger(db *LocalDB) {
+	ticker := time.NewTicker(1 * time.Minute)
+
+	go func() {
+		for range ticker.C {
+			if db.MyIdentity == nil || len(db.MyWallets) == 0 {
+				// Either ID not setup or no wallet registered
+				continue
+			}
+			pingAllWallets(db)
+		}
+	}()
+}
+
+func pingAllWallets(db *LocalDB) {
+	for walletPubHex := range db.MyWallets {
+		walletPubKey, err := hex.DecodeString(walletPubHex)
+		if err != nil {
+			continue
+		}
+
+		req := api.LivenessRequest{
+			Username: db.MyIdentity.Name,
+			// boh qua dipende da come viene fatto tss poi
+			PublicKey: walletPubKey,
+			Timestamp: time.Now().Unix(),
+		}
+
+		reqBytes, _ := json.Marshal(req)
+		sign := ed25519.Sign(db.MyIdentity.PrivateKey, reqBytes)
+
+		signedReq := api.SignedLivenessRequest{
+			Data: req,
+			Signature: sign,
+		}
+
+		err = callAPI("POST", "/liveness", signedReq, nil)
+		if err != nil {
+			fmt.Printf("Failed liveness ping")
+			continue
+		}
+	}
+}
+
 func (cs *ClientSender) Send(msg keyexchange.Message) error {
 	err := callAPI("POST", "/relay/send", msg, nil)
 	if err != nil {
@@ -262,9 +302,11 @@ type ClientDirectory struct {
 }
 
 func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
+	/* Prima c'era questa roba, I am at a loss of words as to why
 	if userID == cd.DB.MyIdentity.Name {
 		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
 	}
+	*/
 
 	hexKey, exists := cd.DB.Contacts[userID]
 	if !exists {
@@ -362,12 +404,21 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	serverShare := shares[0]
 	friendSharesRaw := shares[1:]
 
-	req := api.RegisterRequest{
+	regReq := api.RegisterRequest{
+		Username:            db.MyIdentity.Name,
 		PublicKey:           pubKeyBytes,
 		ServerShare:         serverShare,
 		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
 		FriendShares:        []api.FriendShareInput{}, // Vuota??
+	}
+
+	dataBytes, _ := json.Marshal(regReq)
+	sign := ed25519.Sign(db.MyIdentity.PrivateKey, dataBytes)
+
+	req := api.SignedRegisterRequest{
+		Data:      regReq,
+		Signature: sign,
 	}
 
 	if err := callAPI("POST", "/register", req, nil); err != nil {
@@ -378,7 +429,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	provider := crypto.NewDefaultProvider()
 	dir := &ClientDirectory{DB: db}
 	sender := &ClientSender{}
-	myPriv, _ := hex.DecodeString(db.MyIdentity.PrivateKey)
+	myPriv := db.MyIdentity.PrivateKey
 
 	fmt.Println("starting key exchange...")
 
@@ -412,24 +463,6 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("Handshakes succesfully initiated")
 }
 
-func checkWallets(db *LocalDB) {
-	fmt.Println("\n--- Watchlist status ---")
-	for name, keyHex := range db.WatchList {
-		var status map[string]interface{}
-		if err := callAPI("GET", "/status/"+keyHex, nil, &status); err != nil {
-			fmt.Printf("%s: [Error]\n", name)
-			continue
-		}
-
-		state := "ACTIVE"
-		if status["recoverable"].(bool) {
-			state = "DEAD (RECOVERABLE)"
-		}
-
-		fmt.Printf("%-15s | %s | Time left: %s\n", name, state, status["time_until_recovery"])
-	}
-}
-
 func recoverShare(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("\n--- Recover share ---")
 	// Simplified selection logic for brevity
@@ -437,7 +470,7 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 	targetHex := readInput(r)
 	targetKey, _ := hex.DecodeString(targetHex)
 	// fmt.Printf("targetHex: %v\n", targetHex)
-	myKey, _ := hex.DecodeString(db.MyIdentity.PublicKey)
+	myKey := db.MyIdentity.PublicKey
 
 	req := api.SharePickupRequest{
 		PubKey:       targetKey,
@@ -473,8 +506,8 @@ Begin:
 
 	db.MyIdentity = &Identity{
 		Name:       name,
-		PublicKey:  hex.EncodeToString(pubKey),
-		PrivateKey: hex.EncodeToString(privKey),
+		PublicKey:  pubKey,
+		PrivateKey: privKey,
 	}
 
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
@@ -512,10 +545,9 @@ func printMenu(db *LocalDB) {
 	fmt.Printf(" USER: %s | CONTACTS: %d | WATCHING: %d | CREATED: %d\n",
 		db.MyIdentity.Name, len(db.Contacts), len(db.WatchList), len(db.MyWallets))
 	fmt.Println("==================================================================")
-	fmt.Println(" 1. Show My Identity (for Dealer)    5. Check Watchlist Status")
-	fmt.Println(" 2. Add a Contact                    6. Recover / Download Share")
-	fmt.Println(" 3. Create New Wallet (Dealer)       7. List My Created Wallets")
-	fmt.Println(" 4. Watch an Existing Wallet         0. Exit")
+	fmt.Println(" 1. Show My Identity (for Dealer)    4. Recover / Download Share")
+	fmt.Println(" 2. Add a Contact                    5. List My Created Wallets")
+	fmt.Println(" 3. Create New Wallet (Dealer)       0. Exit")
 	fmt.Println("==================================================================")
 }
 
@@ -558,20 +590,6 @@ func addContact(r *bufio.Reader, db *LocalDB) {
 	saveDB(db)
 
 	fmt.Printf("Contact '%s' fetched and verified.\n", name)
-}
-
-func addToWatchlist(r *bufio.Reader, db *LocalDB) {
-	fmt.Print("Wallet name (e.g. 'Alice Main'): ")
-	name, _ := r.ReadString('\n')
-	name = strings.TrimSpace(name)
-
-	fmt.Print("Wallet public key (Hex): ")
-	key, _ := r.ReadString('\n')
-	key = strings.TrimSpace(key)
-
-	db.WatchList[name] = key
-	saveDB(db)
-	fmt.Println("Wallet added to watchlist.")
 }
 
 func listCreatedWallets(db *LocalDB) {

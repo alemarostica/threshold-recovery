@@ -5,6 +5,7 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -46,9 +47,9 @@ func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
 }
 
 // This take a wallet name and finds the corresponding file on local storage
-func (s *JSONStore) GetWallet(pubKey []byte) (*core.Wallet, error) {
+func (s *JSONStore) GetWallet(pubKey []byte, userPubKey ed25519.PublicKey) (*core.Wallet, error) {
 	// fmt.Printf("[GetWallet] pubkey: %v\n", pubKey)
-	id := s.deriveID(pubKey)
+	id := s.deriveID(pubKey, userPubKey)
 	// fmt.Printf("[GetWallet] id (derived): %v\n", id)
 	path := filepath.Join(s.DataDir, id+".json")
 	data, err := os.ReadFile(path)
@@ -62,8 +63,8 @@ func (s *JSONStore) GetWallet(pubKey []byte) (*core.Wallet, error) {
 }
 
 // Creates a new wallet to local storage
-func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
-	w.ID = s.deriveID(w.PublicKey)
+func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error {
+	w.ID = s.deriveID(w.PublicKey, userPubKey)
 
 	path := filepath.Join(s.DataDir, w.ID+".json")
 
@@ -75,8 +76,8 @@ func (s *JSONStore) RegisterWallet(w *core.Wallet) error {
 }
 
 // Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
-func (s *JSONStore) UpdateLiveness(pubKey []byte) error {
-	w, err := s.GetWallet(pubKey)
+func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error {
+	w, err := s.GetWallet(pubKey, userPubKey)
 	if err != nil {
 		return err
 	}
@@ -95,9 +96,10 @@ func (s *JSONStore) save(w *core.Wallet) error {
 }
 
 // Deterministically derive a Public key into a storage ID
-func (s *JSONStore) deriveID(pubKey []byte) string {
+func (s *JSONStore) deriveID(pubKey []byte, userPubKey ed25519.PublicKey) string {
 	h := hmac.New(sha256.New, s.HMACSecret)
 	h.Write(pubKey)
+	h.Write(userPubKey)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

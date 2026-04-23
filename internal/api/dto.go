@@ -15,11 +15,17 @@ type FriendShareInput struct {
 
 // The request to register a wallet
 type RegisterRequest struct {
+	Username            string              `json:"username"`
 	PublicKey           []byte              `json:"public_key"`
 	ServerShare         crypto.Share        `json:"server_share"`
 	Commitments         []crypto.Commitment `json:"commitments"`
 	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
 	FriendShares        []FriendShareInput  `json:"friend_shares"`
+}
+
+type SignedRegisterRequest struct {
+	Data      RegisterRequest `json:"data"`
+	Signature []byte          `json:"signature"`
 }
 
 type SharePickupRequest struct {
@@ -38,9 +44,14 @@ type SharePickupResponse struct {
 
 // Liveness request is the JSON body for POST /liveness
 type LivenessRequest struct {
+	Username  string `json:"username"`
 	PublicKey []byte `json:"public_key"`
 	Timestamp int64  `json:"timestamp"` // Should help preventing replay attacks
-	Signature []byte `json:"signature"` // User's proof
+}
+
+type SignedLivenessRequest struct {
+	Data      LivenessRequest `json:"data"`
+	Signature []byte          `json:"singature"`
 }
 
 // The request to the server to provide a partial signature
