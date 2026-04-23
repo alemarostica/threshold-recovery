@@ -57,8 +57,8 @@ func NewHandler(
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.handleRegister)
 	mux.HandleFunc("POST /liveness", h.handleLiveness)
-	mux.HandleFunc("POST /recover", h.handleSignRecovery)
-	mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
+	// mux.HandleFunc("POST /recover", h.handleSignRecovery)
+	// mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
 	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
 	mux.HandleFunc("GET /participants", h.handleGetParticipants)
 	mux.HandleFunc("POST /relay/send", h.handlePostMessage)
@@ -100,6 +100,7 @@ func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(msgs)
 }
 
+/*
 func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
 	var req SharePickupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -140,7 +141,8 @@ func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(resp)
-}
+        }
+*/
 
 // Returns the status of a specific wallet
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +179,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
 		return
 	}
-
+	   
 	mailbox := make(map[string][]byte)
 	for _, item := range req.FriendShares {
 		slotID := h.Service.DeriveFriendSlot(req.PublicKey, item.FriendPubKey)
@@ -250,6 +252,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 }
 
 // TODO: How do we do it now that the HMAC of the wallet also has the userPubKey?
+/*
 func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 	var req SignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -291,6 +294,7 @@ func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
 		"partial_signature": partialSig,
 	})
 }
+*/
 
 func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterParticipantRequest
@@ -315,7 +319,15 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusConflict)
 	}
 
+	serverPubKey := h.PrivKey.Public().(ed25519.PublicKey)
+
+	resp := RegisterResponse{
+		ServerPublicKey: serverPubKey,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {

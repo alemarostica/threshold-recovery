@@ -29,9 +29,8 @@ var pendingShares = make(map[string][]byte)
 
 // Configuration
 const (
-	ServerURL             = "https://localhost:8443"
-	DBFile                = "client_db.json"
-	PinnedServerPubKeyHex = ""
+	ServerURL = "https://localhost:8443"
+	DBFile    = "client_db.json"
 )
 
 // Local storage models
@@ -41,6 +40,7 @@ type LocalDB struct {
 	WatchList      map[string]string `json:"watchlist"`
 	MyWallets      map[string]string `json:"my_wallets"`
 	DirectoryEpoch uint64            `json:"directory_epoch"`
+	ServerPub      ed25519.PublicKey `json:"server_pub"`
 }
 
 type Identity struct {
@@ -235,6 +235,7 @@ func pollRelay(db *LocalDB) {
 			// Temporary print
 			if len(plaintextShare) > 16 {
 				fmt.Printf("share preview: %x...\n", plaintextShare[:16])
+				os.WriteFile("test.bin", plaintextShare, 0644)
 			}
 
 			delete(activeSessions, msg.From)
@@ -277,7 +278,7 @@ func pingAllWallets(db *LocalDB) {
 		sign := ed25519.Sign(db.MyIdentity.PrivateKey, reqBytes)
 
 		signedReq := api.SignedLivenessRequest{
-			Data: req,
+			Data:      req,
 			Signature: sign,
 		}
 
@@ -301,12 +302,14 @@ type ClientDirectory struct {
 	DB *LocalDB
 }
 
-func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
-	/* Prima c'era questa roba, I am at a loss of words as to why
+func (cd *ClientDirectory) GetUsernames() ([]byte, error) {
+	return nil, nil
+}
+
+func (cd *ClientDirectory) GetPublicKey(userID string) (ed25519.PublicKey, error) {
 	if userID == cd.DB.MyIdentity.Name {
-		return hex.DecodeString(cd.DB.MyIdentity.PublicKey)
+		return cd.DB.MyIdentity.PublicKey, nil
 	}
-	*/
 
 	hexKey, exists := cd.DB.Contacts[userID]
 	if !exists {
@@ -316,18 +319,12 @@ func (cd *ClientDirectory) GetPublicKey(userID string) ([]byte, error) {
 	return hex.DecodeString(hexKey)
 }
 
-// TODO: this is a demo
 func (cd *ClientDirectory) GetEpoch() uint64 {
-	return 1
+	return cd.DB.DirectoryEpoch
 }
 
 func createWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
-
-	if len(db.Contacts) == 0 {
-		fmt.Println("Error: You have no contacts. Add shareholders first.")
-		return
-	}
 
 	// Get n and k
 	fmt.Print("Enter total number of shares (n): ")
@@ -344,7 +341,6 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
-	// Select friends
 	fmt.Println("\nYour contacts:")
 	var names []string
 	for name := range db.Contacts {
@@ -354,6 +350,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 
 	fmt.Printf("Enter %d friend names, comma separated: ", n-1)
 	chosenStr := readInput(r)
+	chosenStr = strings.TrimSpace(chosenStr)
 	chosenNames := strings.Split(chosenStr, ",")
 
 	var friendKeys [][]byte
@@ -486,7 +483,7 @@ func recoverShare(r *bufio.Reader, db *LocalDB) {
 	data := binBuffer.Bytes()
 	err := os.WriteFile("recovered_share.bin", data, 0600)
 	if err != nil {
-		fmt.Println("File error: %v\n", err)
+		fmt.Printf("File error: %v\n", err)
 		return
 	}
 
@@ -510,22 +507,26 @@ Begin:
 		PrivateKey: privKey,
 	}
 
+	var resp api.RegisterResponse
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
-	if err := callAPI("POST", "/participants", req, nil); err != nil {
+	if err := callAPI("POST", "/participants", req, &resp); err != nil {
 		fmt.Printf("Server registration failed: %v\n", err)
 		// goto jumpscare
 		// Però dai, nel kernel di Linux lo usano in questa maniera quindi ci sta
 		goto Begin
 	}
+	db.ServerPub = resp.ServerPublicKey
+
 	saveDB(db)
 }
 
 // Helpers
 func loadDB() *LocalDB {
 	db := &LocalDB{
-		Contacts:  make(map[string]string),
-		WatchList: make(map[string]string),
-		MyWallets: make(map[string]string),
+		Contacts:       make(map[string]string),
+		WatchList:      make(map[string]string),
+		MyWallets:      make(map[string]string),
+		DirectoryEpoch: 0,
 	}
 	data, err := os.ReadFile(DBFile)
 	if err == nil {
@@ -549,6 +550,7 @@ func printMenu(db *LocalDB) {
 	fmt.Println(" 2. Add a Contact                    5. List My Created Wallets")
 	fmt.Println(" 3. Create New Wallet (Dealer)       0. Exit")
 	fmt.Println("==================================================================")
+	fmt.Printf("Server Pub: %s\n", db.ServerPub)
 }
 
 func showIdentity(db *LocalDB) {
@@ -559,37 +561,37 @@ func showIdentity(db *LocalDB) {
 }
 
 func addContact(r *bufio.Reader, db *LocalDB) {
-	fmt.Printf("Friend's name: ")
-	name, _ := r.ReadString('\n')
-	name = strings.TrimSpace(name)
+	fmt.Print("Inserisci il nome (ID) dell'amico da aggiungere: ")
+	name := readInput(r)
+	if name == "" {
+		fmt.Println("Il nome non puó essere vuoto.")
+		return
+	}
 
-	var resp api.SignedParticipantResponse
-	err := callAPI("GET", fmt.Sprintf("/participants?id=%s", name), nil, &resp)
+	var signedResp api.SignedParticipantResponse
+	err := callAPI("GET", fmt.Sprintf("/participants?id=%s", name), nil, &signedResp)
 	if err != nil {
-		fmt.Printf("Failed to fetch participant %s: %v", name, err)
+		fmt.Printf("error while fetching user '%s': %v", name, err)
 		return
 	}
 
-	dataBytes, _ := json.Marshal(resp.Data)
-	// TODO: pubkey del server hardcoded, la facciamo inviare dal server?
-	// Dovrebbe essere inviata con TLS quindi non dovrebbero esserci problemi.
-	serverPubKey, _ := hex.DecodeString(PinnedServerPubKeyHex)
-
-	if !ed25519.Verify(serverPubKey, dataBytes, resp.Signature) {
-		fmt.Println("Invalid server signature!")
+	resp := signedResp.Data
+	dataBytes, _ := json.Marshal(resp)
+	if !ed25519.Verify(db.ServerPub, dataBytes, signedResp.Signature) {
+		fmt.Println("Invalid response signature.")
 		return
 	}
 
-	if resp.Data.Epoch < db.DirectoryEpoch {
-		fmt.Printf("Epoch rollback")
+	if resp.Epoch < db.DirectoryEpoch {
+		fmt.Println("Obsolete epoch.")
 		return
 	}
 
-	db.DirectoryEpoch = resp.Data.Epoch
-	db.Contacts[name] = hex.EncodeToString(resp.Data.PublicKey)
+	db.Contacts[name] = hex.EncodeToString(resp.PublicKey)
+	db.DirectoryEpoch = resp.Epoch
 	saveDB(db)
 
-	fmt.Printf("Contact '%s' fetched and verified.\n", name)
+	fmt.Printf("Added friend '%s'.\n", name)
 }
 
 func listCreatedWallets(db *LocalDB) {

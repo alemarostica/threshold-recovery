@@ -1,5 +1,7 @@
 package keyexchange
 
+import "crypto/ed25519"
+
 // --- CRYPTO INTERFACES ---
 
 type CryptoProvider interface {
@@ -21,7 +23,7 @@ type CryptoProvider interface {
 // --- SERVER INTERFACE ---
 
 type Directory interface {
-	GetPublicKey(userID string) ([]byte, error)
+	GetPublicKey(userID string) (ed25519.PublicKey, error)
 	GetEpoch() uint64
 }
 

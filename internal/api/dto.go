@@ -28,6 +28,10 @@ type SignedRegisterRequest struct {
 	Signature []byte          `json:"signature"`
 }
 
+type RegisterResponse struct {
+	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
+}
+
 type SharePickupRequest struct {
 	PubKey       []byte `json:"public_key"`
 	FriendPubKey []byte `json:"friend_public_key"`
