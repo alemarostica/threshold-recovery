@@ -277,7 +277,7 @@ func pingAllWallets(db *LocalDB) {
 		sign := ed25519.Sign(db.MyIdentity.PrivateKey, reqBytes)
 
 		signedReq := api.SignedLivenessRequest{
-			Data: req,
+			Data:      req,
 			Signature: sign,
 		}
 
@@ -410,7 +410,6 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		ServerShare:         serverShare,
 		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
-		FriendShares:        []api.FriendShareInput{}, // Vuota??
 	}
 
 	dataBytes, _ := json.Marshal(regReq)
