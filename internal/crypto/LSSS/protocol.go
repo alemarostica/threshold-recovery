@@ -155,5 +155,3 @@ func CoefficientsForSecret(M Matrix, n int, indices []ParticipantID) []Element {
 
 	return cis
 }
-
-// prova
