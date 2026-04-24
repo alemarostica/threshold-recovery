@@ -6,11 +6,11 @@ import (
 	"filippo.io/edwards25519"
 )
 
-type Element = edwards25519.Scalar
-type Matrix [][]Element
+type Scalar = edwards25519.Scalar
+type Matrix [][]Scalar
 
-func scalarOne() Element {
-	var one Element
+func scalarOne() Scalar {
+	var one Scalar
 
 	b := make([]byte, 32)
 	b[0] = 1
@@ -22,17 +22,17 @@ func scalarOne() Element {
 	return one
 }
 
-func scalarZero() Element {
-	var z Element
+func scalarZero() Scalar {
+	var z Scalar
 	return z
 }
 
-func computePowers(alpha *Element, maxExp int) []Element {
+func computePowers(alpha *Scalar, maxExp int) []Scalar {
 	if maxExp < 0 {
 		panic("negative maxExp")
 	}
 
-	powers := make([]Element, maxExp+1)
+	powers := make([]Scalar, maxExp+1)
 	one := scalarOne()
 	powers[0].Set(&one)
 
@@ -53,7 +53,7 @@ func computePowers(alpha *Element, maxExp int) []Element {
 // riga 0: 1 1 1 ... 1
 // riga 1: 1 α α ... α
 // riga i>=2: 0 1 α^(i-1) α^(2(i-1)) ... α^((n-1)(i-1))
-func BuildM(alpha *Element, k, n int) Matrix {
+func BuildM(alpha *Scalar, k, n int) Matrix {
 	if k < 2 {
 		panic("k must be at least 2")
 	}
@@ -67,7 +67,7 @@ func BuildM(alpha *Element, k, n int) Matrix {
 
 	M := make(Matrix, k)
 	for i := range M {
-		M[i] = make([]Element, cols)
+		M[i] = make([]Scalar, cols)
 	}
 
 	one := scalarOne()
