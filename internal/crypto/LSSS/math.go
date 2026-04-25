@@ -1,6 +1,8 @@
 package lsss
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"filippo.io/edwards25519"
@@ -106,4 +108,17 @@ func PrintMatrix(M Matrix) {
 		}
 		fmt.Println()
 	}
+}
+
+func IntToBytes(i int) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint64(buf, uint64(i))
+	return buf
+}
+
+func BytesToParticipantID(b []byte) (ParticipantID, error) {
+	if len(b) != 4 {
+		return 0, errors.New("invalid participant id length")
+	}
+	return ParticipantID(binary.BigEndian.Uint32(b)), nil
 }
