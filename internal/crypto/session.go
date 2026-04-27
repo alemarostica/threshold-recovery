@@ -5,38 +5,40 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"sort"
 )
 
 type Session struct {
 	ID        []byte
-	Indices   []int
+	Indices   []ParticipantID
 	IndexHash []byte
 }
 
-func NewSession(indices []int) (*Session, error) {
-	if len(indices) < 2 {
-		return nil, errors.New("need at least 2 participants")
+func NewSession(indices []ParticipantID, k, n int) (*Session, error) {
+	cp, err := NormalizeParticipantIDs(indices, n)
+	if err != nil {
+		return nil, err
 	}
-	cp := append([]int(nil), indices...) //create a copy of the slice
-	sort.Ints(cp)                        // the order doesn't matter
+
+	if len(cp) != k {
+		return nil, errors.New("invalid number of signers")
+	}
 
 	h := sha256.New()
-	tmp := make([]byte, 4) // buffer of 4 bytes used for every index
-	for _, i := range cp {
-		binary.BigEndian.PutUint32(tmp, uint32(i)) // example: i=1 → 00 00 00 01
-		h.Write(tmp)                               // concatenate the 4 bytes in the hashing
+	tmp := make([]byte, 4)
+
+	for _, id := range cp {
+		binary.BigEndian.PutUint32(tmp, uint32(id))
+		h.Write(tmp)
 	}
 
-	// creation of 32 random bytes
 	sid := make([]byte, 32)
 	if _, err := rand.Read(sid); err != nil {
 		return nil, err
 	}
 
 	return &Session{
-		ID:        sid,        // random session ID
-		Indices:   cp,         // ordered list
-		IndexHash: h.Sum(nil), // final digest (32 byte)
+		ID:        sid,
+		Indices:   cp,
+		IndexHash: h.Sum(nil),
 	}, nil
 }

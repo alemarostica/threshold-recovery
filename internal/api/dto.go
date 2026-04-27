@@ -15,12 +15,11 @@ type FriendShareInput struct {
 
 // The request to register a wallet
 type RegisterRequest struct {
-	Username            string              `json:"username"`
-	PublicKey           []byte              `json:"public_key"`
-	ServerShare         crypto.Share        `json:"server_share"`
-	Commitments         []crypto.Commitment `json:"commitments"`
-	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
-	FriendShares        []FriendShareInput  `json:"friend_shares"`
+	Username            string             `json:"username"`
+	PublicKey           []byte             `json:"public_key"`
+	ServerShare         crypto.Scalar      `json:"server_share"`
+	Commitments         crypto.Commitments `json:"commitments"`
+	InactivityThreshold time.Duration      `json:"inactivity_threshold"`
 }
 
 type SignedRegisterRequest struct {
@@ -32,7 +31,7 @@ type RegisterResponse struct {
 	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
 }
 
-type SharePickupRequest struct {
+	type SharePickupRequest struct {}
 	PubKey       []byte `json:"public_key"`
 	FriendPubKey []byte `json:"friend_public_key"`
 

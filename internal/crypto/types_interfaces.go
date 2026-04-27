@@ -1,4 +1,4 @@
-package lsss
+package crypto
 
 type PartialSignature struct {
 	Index ParticipantID

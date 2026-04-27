@@ -79,8 +79,7 @@ func main() {
 
 	// Logic and API
 	// struct in internal/api/router.go
-	verifier := crypto.NewFeldmanVerifier()
-	handler := api.NewHandler(fileStore, verifier, *auditLogger, serverPriv)
+	handler := api.NewHandler(fileStore, *auditLogger, serverPriv)
 
 	// Router
 	mux := http.NewServeMux()

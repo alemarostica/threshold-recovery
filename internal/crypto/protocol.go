@@ -1,4 +1,4 @@
-package lsss
+package crypto
 
 import (
 	"crypto/sha256"

@@ -30,8 +30,8 @@ type Wallet struct {
 
 	// Cryptography stuff
 	// The server's share, locked unless policy allows access
-	ServerShare crypto.Share        `json:"server_share"`
-	Commitments []crypto.Commitment `json:"commitments"`
+	ServerShare crypto.Scalar      `json:"server_share"`
+	Commitments crypto.Commitments `json:"commitments"`
 
 	// A sort of "mailbox" for other users
 	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share

@@ -1,6 +1,9 @@
 package keyexchange
 
-import "crypto/ed25519"
+import (
+	"crypto/ed25519"
+	"threshold-recovery/internal/crypto"
+)
 
 // --- CRYPTO INTERFACES ---
 
@@ -29,4 +32,11 @@ type Directory interface {
 
 type MessageSender interface {
 	Send(msg Message) error
+}
+
+type ShareMessage struct {
+	Index       int                 `json:"index"`
+	Share       crypto.Scalar       `json:"scalar"`
+	Commitments crypto.Commitments  `json:"commitments"`
+	PubParams   crypto.PublicParams `json:"public_params"`
 }

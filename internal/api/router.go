@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"sync"
 	"threshold-recovery/internal/core"
-	"threshold-recovery/internal/crypto"
 	"threshold-recovery/internal/keyexchange"
 	"time"
 )
@@ -33,20 +32,17 @@ type WalletService interface {
 
 type Handler struct {
 	Service  WalletService
-	Verifier crypto.Verifier
 	Audit    core.AuditLogger
 	PrivKey  ed25519.PrivateKey
 }
 
 func NewHandler(
 	s WalletService,
-	v crypto.Verifier,
 	a core.AuditLogger,
 	privKey ed25519.PrivateKey,
 ) *Handler {
 	return &Handler{
 		Service:  s,
-		Verifier: v,
 		Audit:    a,
 		PrivKey:  privKey,
 	}
@@ -57,8 +53,6 @@ func NewHandler(
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.handleRegister)
 	mux.HandleFunc("POST /liveness", h.handleLiveness)
-	// mux.HandleFunc("POST /recover", h.handleSignRecovery)
-	// mux.HandleFunc("POST /mailbox/pickup", h.handleMailboxPickup)
 	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
 	mux.HandleFunc("GET /participants", h.handleGetParticipants)
 	mux.HandleFunc("POST /relay/send", h.handlePostMessage)
@@ -171,12 +165,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Validate the input
 	if len(req.PublicKey) == 0 {
 		http.Error(w, "Missing Public Key", http.StatusBadRequest)
-		return
-	}
-
-	// Validate Cryptography
-	if !h.Verifier.VerifyShare(req.ServerShare, req.Commitments) {
-		http.Error(w, "Invalid Share Commitment", http.StatusForbidden)
 		return
 	}
 	   
