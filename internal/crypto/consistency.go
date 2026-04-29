@@ -9,7 +9,7 @@ type Commitments struct {
 }
 
 func (p *Protocol) GenerateCommitments(v SecretVector) Commitments {
-	coeffs := make([]Scalar, p.PP.K)
+	coeffs := make([]Scalar, p.PP.K+1)
 	coeffs[0].Set(&v.S)
 	coeffs[1].Set(&v.R2)
 	for i := 1; i < p.PP.K; i++ {
@@ -18,7 +18,7 @@ func (p *Protocol) GenerateCommitments(v SecretVector) Commitments {
 
 	points := make([]Point, p.PP.K+1)
 
-	for i := 0; i <= p.PP.K+1; i++ {
+	for i := 0; i <= p.PP.K; i++ {
 		var point Point
 		point.ScalarBaseMult(&coeffs[i])
 		points[i].Set(&point)

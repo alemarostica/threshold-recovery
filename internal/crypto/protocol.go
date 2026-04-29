@@ -255,11 +255,11 @@ func VerifySignature(P []byte, msg []byte, sig WireSignature, sess Session) bool
 	var z Scalar
 	var zero Scalar
 
-	if z.Equal(&zero) == 1 {
+	if _, err := z.SetCanonicalBytes(sig.Z); err != nil {
 		return false
 	}
 
-	if _, err := z.SetCanonicalBytes(sig.Z); err != nil {
+	if z.Equal(&zero) == 1 {
 		return false
 	}
 
