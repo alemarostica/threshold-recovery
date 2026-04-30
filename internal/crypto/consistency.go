@@ -28,7 +28,9 @@ func (p *Protocol) GenerateCommitments(v SecretVector) Commitments {
 }
 
 func (p *Protocol) VerifyShare(participantID ParticipantID, share Scalar, commitments Commitments) bool {
-	if int(participantID) < 1 || int(participantID) > p.PP.N {
+	// Prima era così, ma avrebbe rejectato la share ricevuta dal server. Penso sia giusto adesso?
+	// if int(participantID) < 1 || int(participantID) > p.PP.N {
+	if int(participantID) < 0 || int(participantID) > p.PP.N {
 		return false
 	}
 	if len(commitments.Points) != p.PP.K+1 {

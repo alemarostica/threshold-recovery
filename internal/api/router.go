@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"sync"
 	"threshold-recovery/internal/core"
+	"threshold-recovery/internal/crypto"
 	"threshold-recovery/internal/keyexchange"
 	"time"
+
+	"filippo.io/edwards25519"
 )
 
 var (
@@ -31,20 +34,23 @@ type WalletService interface {
 }
 
 type Handler struct {
-	Service  WalletService
-	Audit    core.AuditLogger
-	PrivKey  ed25519.PrivateKey
+	Service WalletService
+	Audit   core.AuditLogger
+	PrivKey ed25519.PrivateKey
+	Alpha   *edwards25519.Scalar
 }
 
 func NewHandler(
 	s WalletService,
 	a core.AuditLogger,
 	privKey ed25519.PrivateKey,
+	alpha *edwards25519.Scalar,
 ) *Handler {
 	return &Handler{
-		Service:  s,
-		Audit:    a,
-		PrivKey:  privKey,
+		Service: s,
+		Audit:   a,
+		PrivKey: privKey,
+		Alpha:   alpha,
 	}
 }
 
@@ -71,8 +77,6 @@ func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	inboxMutex.Unlock()
 
 	w.WriteHeader(http.StatusAccepted)
-	// TODO: remove
-	fmt.Printf("[Relay] Message %s from %s to %s stored\n", msg.Type, msg.From, msg.To)
 }
 
 func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
@@ -94,51 +98,6 @@ func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(msgs)
 }
 
-/*
-func (h *Handler) handleMailboxPickup(w http.ResponseWriter, r *http.Request) {
-	var req SharePickupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	// fmt.Printf("req.WalletID: %v\n", req.PubKey)
-
-	wallet, err := h.Service.GetWallet(req.PubKey)
-	if err != nil {
-		http.Error(w, "Wallet not found", http.StatusNotFound)
-		return
-	}
-
-	// Derive the slot ID from the provided friend's public key
-	slotID := h.Service.DeriveFriendSlot([]byte(wallet.PublicKey), req.FriendPubKey)
-
-	// Gatekeep is the user is not dead
-	if !wallet.IsRecoverable() {
-		h.Audit.Log(wallet.ID, core.EventSharePickupDenied, "Slot "+slotID+" tried to pick up share too early")
-		http.Error(w, "RECOVERY LOCKED: User is still active.", http.StatusForbidden)
-		return
-	}
-
-	// Authentication will have to be here, which kind?
-	shareBlob, ok := wallet.FriendShares[slotID]
-	if !ok {
-		http.Error(w, "No share found for this ID", http.StatusNotFound)
-		return
-	}
-
-	h.Audit.Log(wallet.ID, core.EventSharePickup, "Friend "+slotID+" collected share")
-
-	resp := SharePickupResponse{
-		ShareBlob: shareBlob,
-		Comms:     wallet.Commitments,
-	}
-
-	json.NewEncoder(w).Encode(resp)
-        }
-*/
-
-// Returns the status of a specific wallet
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
 
@@ -154,12 +113,13 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	participant, _, err := h.Service.GetParticipant(req.Username)
 	if err != nil {
-		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
 		return
 	}
 
 	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
-		fmt.Println("Invalid request signature.")
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
+		return
 	}
 
 	// Validate the input
@@ -167,11 +127,13 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing Public Key", http.StatusBadRequest)
 		return
 	}
-	   
-	mailbox := make(map[string][]byte)
-	for _, item := range req.FriendShares {
-		slotID := h.Service.DeriveFriendSlot(req.PublicKey, item.FriendPubKey)
-		mailbox[slotID] = item.EncryptedBlob
+
+	// Not sure it works perché non sappiamo se la matrice ha la colonna del server?
+	// In ogni caso VerifyShare rejecta participantID < 1 bruuuuh
+	protocol := crypto.NewProtocol(h.Alpha, req.PubParams.K, req.PubParams.N)
+	if !protocol.VerifyShare(0, req.ServerShare, req.Commitments) {
+		http.Error(w, "Could not verify server share", http.StatusUnauthorized)
+		return
 	}
 
 	// Map the received DTO to the model
@@ -184,7 +146,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Default expiration = Now + Threshold
 		// TODO: change if necessary
 		ExpirationDate: time.Now().Add(req.InactivityThreshold),
-		FriendShares:   mailbox,
 	}
 
 	// Save it
@@ -239,51 +200,6 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"liveness_updated"}`))
 }
 
-// TODO: How do we do it now that the HMAC of the wallet also has the userPubKey?
-/*
-func (h *Handler) handleSignRecovery(w http.ResponseWriter, r *http.Request) {
-	var req SignRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	// Recover wallet
-	wallet, err := h.Service.GetWallet(req.PublicKey)
-	if err != nil {
-		http.Error(w, "Wallet not found", http.StatusNotFound)
-		return
-	}
-
-	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
-
-	// Verify if user is dead
-	if !wallet.IsRecoverable() {
-		h.Audit.Log(pubKeyHex, core.EventSignBlocked, "Somebody tried to recover wallet while user is still alive!")
-		http.Error(w, "RECOVERY LOCKED", http.StatusForbidden)
-		return
-	}
-
-	// Here dead-man switch must have triggered
-	// Server accepts using its share
-
-	partialSig, err := h.Verifier.SignPartial(wallet.ServerShare, []byte(req.Message))
-	if err != nil {
-		h.Audit.Log(wallet.ID, core.EventSignAttempt, "")
-		http.Error(w, "Signing failed", http.StatusInternalServerError)
-		return
-	}
-
-	h.Audit.Log(wallet.ID, core.EventSignSuccess, "")
-	// Answer with partial signature
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":            "recovery_success",
-		"partial_signature": partialSig,
-	})
-}
-*/
-
 func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterParticipantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -309,8 +225,9 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 
 	serverPubKey := h.PrivKey.Public().(ed25519.PublicKey)
 
-	resp := RegisterResponse{
+	resp := RegisterParticipantResponse{
 		ServerPublicKey: serverPubKey,
+		Alpha:           *h.Alpha,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -122,3 +122,14 @@ func BytesToParticipantID(b []byte) (ParticipantID, error) {
 	}
 	return ParticipantID(binary.BigEndian.Uint32(b)), nil
 }
+
+func GenerateAlpha() *edwards25519.Scalar {
+	g := new(edwards25519.Scalar)
+	g.SetCanonicalBytes([]byte{
+		2, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+	})
+	return g
+}

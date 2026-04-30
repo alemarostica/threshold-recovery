@@ -14,6 +14,8 @@ import (
 	"threshold-recovery/internal/core"
 	"threshold-recovery/internal/crypto"
 	"threshold-recovery/internal/store"
+
+	"filippo.io/edwards25519"
 )
 
 func main() {
@@ -77,9 +79,35 @@ func main() {
 	// TODO: bruh decidere se inviarla o hardcodarla
 	fmt.Printf("Server pubKey: %s\n", serverPub)
 
+	alphaPath := filepath.Join(cfg.DataDir, "alpha")
+	var alpha *edwards25519.Scalar
+
+	// Is alpha already generated?
+	data, err = os.ReadFile(alphaPath)
+	if err == nil {
+		// it does, load it
+		alphaBytes, err := hex.DecodeString(string(data))
+		if err != nil {
+			log.Fatalf("Error decoding: %v", err)
+		}
+
+		alpha, err = edwards25519.NewScalar().SetCanonicalBytes(alphaBytes)
+		if err != nil {
+			log.Fatalf("Failed to load alpha: %v", err)
+		}
+	} else {
+		alpha := crypto.GenerateAlpha()
+
+		// scrivo la chiave sul file
+		err = os.WriteFile(alphaPath, []byte(hex.EncodeToString(alpha.Bytes())), 0600)
+		if err != nil {
+			log.Fatalf("Failed to save the alpha: %v", err)
+		}
+	}
+
 	// Logic and API
 	// struct in internal/api/router.go
-	handler := api.NewHandler(fileStore, *auditLogger, serverPriv)
+	handler := api.NewHandler(fileStore, *auditLogger, serverPriv, alpha)
 
 	// Router
 	mux := http.NewServeMux()

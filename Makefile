@@ -5,7 +5,7 @@ CLIENT_BINARY_NAME=$(CLIENT_DIR)/client
 SERVER_SOURCE=./cmd/server/main.go
 CLIENT_SOURCE=./cmd/client/main.go
 
-.PHONY: build-all build-server run-server build-client clean
+.PHONY: build-all build-server run-server build-client clean clean-all
 
 build-all: build-server build-client
 
@@ -22,9 +22,15 @@ build-client:
 	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE)
 
 clean:
-	@echo "Cleaning up..."
+	@echo "Cleaning executables..."
+	rm -f $(SERVER_BINARY_NAME)
+	rm -f $(CLIENT_BINARY_NAME)
+	@echo "Done."
+
+clean-all:
+	@echo "Cleaning executables and directories..."
 	rm -f $(SERVER_BINARY_NAME)
 	rm -f $(CLIENT_BINARY_NAME)
 	rm -fr $(CLIENT_DIR)
-	## rm -fr ./data/*.json
+	rm -fr ./data/
 	@echo "Done."

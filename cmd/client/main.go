@@ -38,12 +38,13 @@ const (
 
 // Local storage models
 type LocalDB struct {
-	MyIdentity     *Identity         `json:"my_identity"`
-	Contacts       map[string]string `json:"contacts"`
-	WatchList      map[string]string `json:"watchlist"`
-	MyWallets      map[string]string `json:"my_wallets"`
-	DirectoryEpoch uint64            `json:"directory_epoch"`
-	ServerPub      ed25519.PublicKey `json:"server_pub"`
+	MyIdentity     *Identity           `json:"my_identity"`
+	Contacts       map[string]string   `json:"contacts"`
+	WatchList      map[string]string   `json:"watchlist"`
+	MyWallets      map[string]string   `json:"my_wallets"`
+	DirectoryEpoch uint64              `json:"directory_epoch"`
+	ServerPub      ed25519.PublicKey   `json:"server_pub"`
+	Alpha          edwards25519.Scalar `json:"alpha"`
 }
 
 type Identity struct {
@@ -114,7 +115,7 @@ func callAPI(method, path string, payload interface{}, out interface{}) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// TODO: actually check certificates
+	// I think this is needed with self signed certificates
 	tr := &http.Transport{TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true,
 	}}
@@ -225,21 +226,28 @@ func pollRelay(db *LocalDB) {
 			}
 
 			// Decrypt share
-			plaintextShare, err := keyexchange.HandleM3(state, msg, provider)
+			plaintextMessage, err := keyexchange.HandleM3(state, msg, provider)
 			if err != nil {
 				fmt.Printf("Failed to decrypt M3 from %s: %v\n", msg.From, err)
 				continue
 			}
 
 			// We received the share
-			// TODO: Save?
 			fmt.Printf("Succesfully received share from %s.", msg.From)
 
 			// Temporary print
-			os.WriteFile("test.bin", plaintextShare, 0644)
-			theShare, err := keyexchange.UnmarshalShare(plaintextShare)
+			os.WriteFile("test.bin", plaintextMessage, 0644)
+			message, err := keyexchange.UnmarshalShare(plaintextMessage)
 			if err != nil {
 				fmt.Printf("Could not unmarshal the share: %v\n")
+				continue
+			}
+
+			// Verification
+			protocol := crypto.NewProtocol(&db.Alpha, message.PubParams.K, message.PubParams.N)
+			if !protocol.VerifyShare(crypto.ParticipantID(message.Index), message.Share, message.Commitments) {
+				// TODO: fuck implementare Message interface per differenti messaggi
+				fmt.Printf("share did not verify")
 				continue
 			}
 
@@ -410,20 +418,26 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	// We generate an ed25519 key
 	// In a real application the user would input his wallet's key
 	// C'mon, this is just a demo
-	walletPubkey, walletPrivKey, err := ed25519.GenerateKey(r)
+	walletPubkey, _, err := ed25519.GenerateKey(r)
 	if err != nil {
 		fmt.Printf("Failed to generate wallet keys: %v\n", err)
 		return
 	}
 
-	digest := sha512.Sum512(walletPrivKey)
+	secretScalarBytes := make([]byte, 64)
+	if _, err := io.ReadFull(r, secretScalarBytes); err != nil {
+		fmt.Println("Failed to generate secret scalar")
+		return
+	}
+
+	digest := sha512.Sum512(secretScalarBytes)
 	lowerHalf := digest[:32]
 
 	lowerHalf[0] &= 248
 	lowerHalf[31] &= 127
 	lowerHalf[31] |= 64
 
-	walletScalar, err := edwards25519.NewScalar().SetBytesWithClamping(lowerHalf)
+	secretScalar, err := edwards25519.NewScalar().SetBytesWithClamping(lowerHalf)
 	if err != nil {
 		panic(err)
 	}
@@ -435,29 +449,9 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 	// I hope this is not problematic lol
-	secretVector_raw[0] = *walletScalar
+	secretVector_raw[0] = *secretScalar
 
-	// temporary random scalar
-	scalar, err := generateRandomScalar(1, r)
-	// TODO: remove
-	if err != nil {
-		fmt.Println("temp scalar jumpscare")
-		return
-	}
-
-	// I cry, non so se sia giusto o ragionevole
-	alpha := func() *crypto.Scalar {
-		g := new(edwards25519.Scalar)
-		g.SetCanonicalBytes([]byte{
-			2, 0, 0, 0, 0, 0, 0, 0,
-			0, 0, 0, 0, 0, 0, 0, 0,
-			0, 0, 0, 0, 0, 0, 0, 0,
-			0, 0, 0, 0, 0, 0, 0, 0,
-		})
-		return g
-	}()
-
-	matrix := crypto.BuildM(alpha, k+1, n+1)
+	matrix := crypto.BuildM(&db.Alpha, k+1, n+1)
 
 	// pubParams e alpha devono arrivare al ricevente per fare il protocol
 	// con cui verificare lo share
@@ -468,7 +462,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		M: matrix,
 	}
 
-	protocol := crypto.NewProtocol(&scalar[0], k+1, n+1)
+	protocol := crypto.NewProtocol(&db.Alpha, k+1, n+1)
 
 	secretVector := crypto.SecretVector{
 		S:  secretVector_raw[0],
@@ -482,6 +476,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		Username:            db.MyIdentity.Name,
 		PublicKey:           walletPubkey,
 		ServerShare:         dealerShares.ServerShare,
+		PubParams:           *pubParams,
 		Commitments:         commitments,
 		InactivityThreshold: timeoutDur,
 	}
@@ -510,7 +505,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		friendName := strings.TrimSpace(cn)
 
 		share := keyexchange.ShareMessage{
-			Index:       i,
+			Index:       i + 1,
 			Share:       dealerShares.ParticipantShares[i],
 			Commitments: commitments,
 			PubParams:   *pubParams,
@@ -560,7 +555,7 @@ Begin:
 		PrivateKey: privKey,
 	}
 
-	var resp api.RegisterResponse
+	var resp api.RegisterParticipantResponse
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
 	if err := callAPI("POST", "/participants", req, &resp); err != nil {
 		fmt.Printf("Server registration failed: %v\n", err)
@@ -569,6 +564,7 @@ Begin:
 		goto Begin
 	}
 	db.ServerPub = resp.ServerPublicKey
+	db.Alpha = resp.Alpha
 
 	saveDB(db)
 }

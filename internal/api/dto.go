@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"threshold-recovery/internal/crypto"
 	"time"
+
+	"filippo.io/edwards25519"
 )
 
 // Data Transfer Objects, everything coming from the outside world
@@ -15,11 +17,12 @@ type FriendShareInput struct {
 
 // The request to register a wallet
 type RegisterRequest struct {
-	Username            string             `json:"username"`
-	PublicKey           []byte             `json:"public_key"`
-	ServerShare         crypto.Scalar      `json:"server_share"`
-	Commitments         crypto.Commitments `json:"commitments"`
-	InactivityThreshold time.Duration      `json:"inactivity_threshold"`
+	Username            string              `json:"username"`
+	PublicKey           []byte              `json:"public_key"`
+	ServerShare         crypto.Scalar       `json:"server_share"`
+	PubParams           crypto.PublicParams `json:"public_params"`
+	Commitments         crypto.Commitments  `json:"commitments"`
+	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
 }
 
 type SignedRegisterRequest struct {
@@ -28,10 +31,6 @@ type SignedRegisterRequest struct {
 }
 
 type RegisterResponse struct {
-	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
-}
-
-	type SharePickupRequest struct {}
 	PubKey       []byte `json:"public_key"`
 	FriendPubKey []byte `json:"friend_public_key"`
 
@@ -40,10 +39,12 @@ type RegisterResponse struct {
 	Signature []byte `json:"signature"`
 }
 
+/*
 type SharePickupResponse struct {
 	ShareBlob []byte              `json:"share_blob"`
 	Comms     []crypto.Commitment `json:"commitments"`
 }
+*/
 
 // Liveness request is the JSON body for POST /liveness
 type LivenessRequest struct {
@@ -66,6 +67,11 @@ type SignRequest struct {
 type RegisterParticipantRequest struct {
 	ID        string            `json:"id"`
 	PublicKey ed25519.PublicKey `json:"public_key"`
+}
+
+type RegisterParticipantResponse struct {
+	ServerPublicKey ed25519.PublicKey   `json:"server_public_key"`
+	Alpha           edwards25519.Scalar `json:"alpha"`
 }
 
 type ParticipantResponse struct {
