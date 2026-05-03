@@ -20,6 +20,7 @@ run-server:
 build-client:
 	@echo "Building the client..."
 	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE)
+	mkdir $(CLIENT_DIR)/1 $(CLIENT_DIR)/2 $(CLIENT_DIR)/3
 
 clean:
 	@echo "Cleaning executables..."

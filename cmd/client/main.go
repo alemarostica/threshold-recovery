@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/tls"
 	"encoding/hex"
@@ -16,19 +17,23 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"threshold-recovery/internal/api"
 	"threshold-recovery/internal/crypto"
 	"threshold-recovery/internal/keyexchange"
 	"time"
 
 	"filippo.io/edwards25519"
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/term"
 )
 
 // Ricorda lo stato delle sessioni di handshake in corso
 var activeSessions = make(map[string]*keyexchange.SessionState)
 
 // Salva temporaneamente le share in attesa che l'handshake finisca
-var pendingShares = make(map[string][]byte)
+var pendingMessages = make(map[string][]byte)
 
 // Configuration
 const (
@@ -48,9 +53,12 @@ type LocalDB struct {
 }
 
 type Identity struct {
-	Name       string             `json:"name"`
-	PublicKey  ed25519.PublicKey  `json:"public_key"`
-	PrivateKey ed25519.PrivateKey `json:"private_key"`
+	Name         string             `json:"name"`
+	PublicKey    ed25519.PublicKey  `json:"public_key"`
+	PrivateKey   ed25519.PrivateKey `json:"-"`
+	EncryptedKey []byte             `json:"encrypted_key"`
+	Salt         []byte             `json:"salt"`
+	Nonce        []byte             `json:"nonce"`
 }
 
 type ClientSender struct{}
@@ -63,9 +71,15 @@ func main() {
 	// First run
 	if db.MyIdentity == nil {
 		setupIdentity(reader, db)
+	} else {
+		if err := loginAndUnlock(db); err != nil {
+			fmt.Printf("Login failed: %v\n", err)
+			return
+		}
 	}
 
 	startMessagePoller(db)
+	startLivenessPinger(db)
 
 	// Loop
 	for {
@@ -96,7 +110,7 @@ func main() {
 	}
 }
 
-func callAPI(method, path string, payload interface{}, out interface{}) error {
+func callAPI(method, path string, payload any, out any) error {
 	var body io.Reader
 	if payload != nil {
 		bz, err := json.Marshal(payload)
@@ -200,7 +214,7 @@ func pollRelay(db *LocalDB) {
 			}
 
 			// Retrieve the pending share
-			shareBlob, ok := pendingShares[msg.From]
+			shareBlob, ok := pendingMessages[msg.From]
 			if !ok {
 				fmt.Printf("No pending share to send to %s\n", msg.From)
 				continue
@@ -216,7 +230,7 @@ func pollRelay(db *LocalDB) {
 			fmt.Printf("M2 verified. Sent M3 to %s.\n", msg.From)
 
 			delete(activeSessions, msg.From)
-			delete(pendingShares, msg.From)
+			delete(pendingMessages, msg.From)
 		case keyexchange.M3:
 			// We are shareholder, dealer sent us encrypted share with M3
 			state, ok := activeSessions[msg.From]
@@ -239,7 +253,7 @@ func pollRelay(db *LocalDB) {
 			os.WriteFile("test.bin", plaintextMessage, 0644)
 			message, err := keyexchange.UnmarshalShare(plaintextMessage)
 			if err != nil {
-				fmt.Printf("Could not unmarshal the share: %v\n")
+				fmt.Printf("Could not unmarshal the share: %v\n", err)
 				continue
 			}
 
@@ -341,7 +355,7 @@ func generateRandomScalar(n int, r *bufio.Reader) ([]crypto.Scalar, error) {
 
 	buf := make([]byte, 64)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, fmt.Errorf("failed to read random bytes: %w", err)
 		}
@@ -517,7 +531,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 			continue
 		}
 
-		pendingShares[friendName] = shareBlob
+		pendingMessages[friendName] = shareBlob
 
 		state, err := keyexchange.StartAsInitiator(db.MyIdentity.Name, friendName, provider, dir, sender, myPriv)
 		if err != nil {
@@ -543,17 +557,50 @@ Begin:
 	fmt.Print("Choose username: ")
 	name := readInput(r)
 
+	fmt.Print("Choose password: ")
+	bytePassword, err := term.ReadPassword(syscall.Stdin)
+	fmt.Println()
+	if err != nil {
+		fmt.Println("Something went wrong while reading password")
+		goto Begin
+	}
+
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Printf("Failed to generate identity keys: %v\n", err)
-		return
+		goto Begin
 	}
 
-	db.MyIdentity = &Identity{
-		Name:       name,
-		PublicKey:  pubKey,
-		PrivateKey: privKey,
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		fmt.Printf("Failed to generate salt: %v\n", err)
+		goto Begin
 	}
+
+	// this is barely useful, there are A LOT of attacks that could be carried out
+	// against this simple password protection,
+	// but at least we don't have the privKey in clear
+	key := pbkdf2.Key(bytePassword, salt, 100000, 32, sha256.New)
+
+	aead, _ := chacha20poly1305.NewX(key)
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		fmt.Printf("Failed to generate nonce: %v\n", err)
+		goto Begin
+	}
+
+	encryptedKey := aead.Seal(nil, nonce, privKey, nil)
+
+	db.MyIdentity = &Identity{
+		Name:         name,
+		PublicKey:    pubKey,
+		PrivateKey:   privKey,
+		EncryptedKey: encryptedKey,
+		Salt:         salt,
+		Nonce:        nonce,
+	}
+
+	fmt.Print("")
 
 	var resp api.RegisterParticipantResponse
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
@@ -567,6 +614,47 @@ Begin:
 	db.Alpha = resp.Alpha
 
 	saveDB(db)
+}
+
+func loginAndUnlock(db *LocalDB) error {
+	fmt.Printf("Welcome back, %s!\n", db.MyIdentity.Name)
+
+	for range 3 {
+		fmt.Printf("Enter password to unlock local database: ")
+		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			return err
+		}
+
+		// godo chacha20poly1305 é già constant time, ci preoccupiamo solo di dormire
+		start := time.Now()
+		targetDuration := 3 * time.Second
+
+		// Derive a 32 byte key to encrypt stuff
+		key := pbkdf2.Key(passwordBytes, db.MyIdentity.Salt, 100000, 32, sha256.New)
+
+		aead, err := chacha20poly1305.NewX(key)
+		if err != nil {
+			return fmt.Errorf("encryption setup failed: %v", err)
+		}
+
+		privKey, err := aead.Open(nil, db.MyIdentity.Nonce, db.MyIdentity.EncryptedKey, nil)
+
+		if err == nil {
+			db.MyIdentity.PrivateKey = privKey
+			fmt.Println("Database unlocked succesfully!")
+			return nil
+		}
+		
+		elapsed := time.Since(start)
+		if elapsed < targetDuration {
+			time.Sleep(targetDuration - elapsed)
+		}
+
+		fmt.Println("Incorrect password. Please try again.")
+	}
+	return errors.New("maximum login attempts reached")
 }
 
 // Helpers

@@ -180,6 +180,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 
 	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
 		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
+		return
 	}
 
 	// Let's try to prevent replay attacks
@@ -221,6 +222,7 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 
 	if err := h.Service.SaveParticipant(p); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 
 	serverPubKey := h.PrivKey.Public().(ed25519.PublicKey)

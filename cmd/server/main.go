@@ -96,7 +96,7 @@ func main() {
 			log.Fatalf("Failed to load alpha: %v", err)
 		}
 	} else {
-		alpha := crypto.GenerateAlpha()
+		alpha = crypto.GenerateAlpha()
 
 		// scrivo la chiave sul file
 		err = os.WriteFile(alphaPath, []byte(hex.EncodeToString(alpha.Bytes())), 0600)

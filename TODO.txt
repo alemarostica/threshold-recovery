@@ -1,17 +1,7 @@
-- Gestire sync di account locale con remoto
-  - Unique identifier è il nome o la public key? Forse la pubkey così si possono fare account con lo stesso nome
 - Check se la roba con HMAC è fatta bene o ho fatto una porcata
 - Mutual TLS o solo del server?
 - Mutex nel json_store?
 - cambiare status per dire solo recoverable o meno?
-- verificare il requester prima che la mailbox restituisca
 - gestiamo replay sulla liveness?
-- Ma se le public key dei destinatari fossero in clear?
-  + Non bisogna aspettare che sia il client a checkare
-- IMPORTANTE: manteniamo che la share è inviata con M3 o ritorniamo al server che le distribuisce?
-- Fase 0 nel protocollo di handshake
-- Cosa succede se si forgia un messaggio di handshake senza rispettare la sequenza?
-  + Dovrebbe essere sicuro, might as well check
-- THE GREAT TYPE UNIFICATION HAS TO BE DONE IN ORDER TO NOT GO MAD
-  + Partially done
 - Authentication with signature on liveness ping
+- Aggiungere hashed password locale + salt

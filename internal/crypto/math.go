@@ -123,6 +123,7 @@ func BytesToParticipantID(b []byte) (ParticipantID, error) {
 	return ParticipantID(binary.BigEndian.Uint32(b)), nil
 }
 
+// Arguably si potrebbe hardcodare, tanto é sempre quella
 func GenerateAlpha() *edwards25519.Scalar {
 	g := new(edwards25519.Scalar)
 	g.SetCanonicalBytes([]byte{
