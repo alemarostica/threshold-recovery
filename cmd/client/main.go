@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -41,15 +40,22 @@ const (
 	DBFile    = "client_db.json"
 )
 
+type Share struct {
+	Value     []byte            `json:"scalar"`
+	Index     int               `json:"index"`
+	Username  string            `json:"username"`
+	WalletPub ed25519.PublicKey `json:"wallet_pub_key"`
+}
+
 // Local storage models
 type LocalDB struct {
 	MyIdentity     *Identity           `json:"my_identity"`
 	Contacts       map[string]string   `json:"contacts"`
-	WatchList      map[string]string   `json:"watchlist"`
 	MyWallets      map[string]string   `json:"my_wallets"`
 	DirectoryEpoch uint64              `json:"directory_epoch"`
 	ServerPub      ed25519.PublicKey   `json:"server_pub"`
 	Alpha          edwards25519.Scalar `json:"alpha"`
+	ReceivedShares []Share             `json:"shares"`
 }
 
 type Identity struct {
@@ -96,7 +102,7 @@ func main() {
 		case "3":
 			createWallet(reader, db)
 		case "4":
-			// recoverShare(reader, db)
+			initializePartialSign(db)
 		case "5":
 			listCreatedWallets(db)
 		case "0":
@@ -257,15 +263,48 @@ func pollRelay(db *LocalDB) {
 				continue
 			}
 
-			// Verification
-			protocol := crypto.NewProtocol(&db.Alpha, message.PubParams.K, message.PubParams.N)
-			if !protocol.VerifyShare(crypto.ParticipantID(message.Index), message.Share, message.Commitments) {
-				// TODO: fuck implementare Message interface per differenti messaggi
-				fmt.Printf("share did not verify")
+			var partShare crypto.Scalar
+			if _, err := partShare.SetCanonicalBytes(message.Share); err != nil {
+				fmt.Printf("Invalid share: %v", err)
 				continue
 			}
 
+			var rebuiltCommitments crypto.Commitment
+
+			for _, b := range message.Commitments {
+				p, _ := edwards25519.NewIdentityPoint().SetBytes(b)
+				rebuiltCommitments = append(rebuiltCommitments, *p)
+			}
+
+			// Verification
+			var part crypto.Participant
+			part.SetID(crypto.ParticipantID(message.Index))
+			part.SetShare(partShare)
+			part.SetName(message.Username)
+			// What? id di tutti i participant? Non é semplicmente un array [1..n]?
+			if ok, err := part.VerifyConsistency(rebuiltCommitments); err != nil {
+				fmt.Printf("Error while verifying share: %v\n", err)
+				continue
+			} else if !ok {
+				fmt.Printf("Share is not consistent?")
+				continue
+			}
+
+			// TODO: Cosa dobbiamo fare? Salvare questa in DB?
+			// Tenerla salvata in execution per quando signiamo? Credo la prima
+			share := Share{
+				Username:  message.Username,
+				WalletPub: message.WalletPub,
+				// TODO: apparently non viene salvato nel json
+				// Probabilmente non va bene il formato
+				Value: partShare.Bytes(),
+				Index: message.Index,
+			}
+
+			db.ReceivedShares = append(db.ReceivedShares, share)
+
 			delete(activeSessions, msg.From)
+			saveDB(db)
 		}
 
 		// the prompt
@@ -317,6 +356,13 @@ func pingAllWallets(db *LocalDB) {
 	}
 }
 
+func initializePartialSign(db *LocalDB) {
+	fmt.Println("Received shares:")
+	for i, share := range db.ReceivedShares {
+		fmt.Printf("%d\t%s\t%v\n", i, share.Username, share.WalletPub)
+	}
+}
+
 func (cs *ClientSender) Send(msg keyexchange.Message) error {
 	err := callAPI("POST", "/relay/send", msg, nil)
 	if err != nil {
@@ -350,25 +396,6 @@ func (cd *ClientDirectory) GetEpoch() uint64 {
 	return cd.DB.DirectoryEpoch
 }
 
-func generateRandomScalar(n int, r *bufio.Reader) ([]crypto.Scalar, error) {
-	scalars := make([]crypto.Scalar, n)
-
-	buf := make([]byte, 64)
-
-	for i := range n {
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return nil, fmt.Errorf("failed to read random bytes: %w", err)
-		}
-
-		s, err := edwards25519.NewScalar().SetUniformBytes(buf[:])
-		if err != nil {
-			return nil, errors.New("failed to generate a random scalar")
-		}
-		scalars[i] = *s
-	}
-	return scalars, nil
-}
-
 func createWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
 
@@ -382,10 +409,10 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	}
 
 	// Same as with n, this is just the friends, server would constitute one shareholder
-	fmt.Print("Enter threshold, at least 2 (k): ")
+	fmt.Print("Enter threshold, at least 1 (k): ")
 	k, err := strconv.Atoi(readInput(r))
-	if err != nil || k < 2 || k > n {
-		fmt.Printf("Error: k must be between 2 and %d\n", n)
+	if err != nil || k < 1 || k > n {
+		fmt.Printf("Error: k must be between 1 and %d\n", n)
 		return
 	}
 
@@ -413,7 +440,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		friendKeys = append(friendKeys, kb)
 	}
 
-	if len(friendKeys) != n-1 {
+	if len(friendKeys) != n {
 		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n", n-1)
 		return
 	}
@@ -432,68 +459,41 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	// We generate an ed25519 key
 	// In a real application the user would input his wallet's key
 	// C'mon, this is just a demo
-	walletPubkey, _, err := ed25519.GenerateKey(r)
+	walletPubkey, walletPrivKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Printf("Failed to generate wallet keys: %v\n", err)
 		return
 	}
 
-	secretScalarBytes := make([]byte, 64)
-	if _, err := io.ReadFull(r, secretScalarBytes); err != nil {
-		fmt.Println("Failed to generate secret scalar")
-		return
+	fmt.Printf("Wallet privKey: %v\n", walletPrivKey)
+
+	// TODO: il secret scalar non lo devo fare con la privKey del wallet?
+
+	var dealer crypto.Dealer
+	dealer.SetTsParameters(n+1, k+1)
+	dealer.SetSecret()
+	dealer.SetFriends(chosenNames)
+	dealer.SetCommAndShares()
+
+	commPoints := *dealer.GetComm()
+	commBytes := make([][]byte, len(commPoints))
+	for i, p := range commPoints {
+		commBytes[i] = p.Bytes()
 	}
 
-	digest := sha512.Sum512(secretScalarBytes)
-	lowerHalf := digest[:32]
-
-	lowerHalf[0] &= 248
-	lowerHalf[31] &= 127
-	lowerHalf[31] |= 64
-
-	secretScalar, err := edwards25519.NewScalar().SetBytesWithClamping(lowerHalf)
-	if err != nil {
-		panic(err)
-	}
-
-	// scalar array for LSSS, first item is scalar from privKey
-	secretVector_raw, err := generateRandomScalar(k+1, r)
-	if err != nil {
-		fmt.Printf("Error while generating scalars: %v", err)
-		return
-	}
-	// I hope this is not problematic lol
-	secretVector_raw[0] = *secretScalar
-
-	matrix := crypto.BuildM(&db.Alpha, k+1, n+1)
-
-	// pubParams e alpha devono arrivare al ricevente per fare il protocol
-	// con cui verificare lo share
-
-	pubParams := &crypto.PublicParams{
-		K: k + 1,
-		N: n + 1,
-		M: matrix,
-	}
-
-	protocol := crypto.NewProtocol(&db.Alpha, k+1, n+1)
-
-	secretVector := crypto.SecretVector{
-		S:  secretVector_raw[0],
-		R2: secretVector_raw[1],
-		T:  secretVector_raw[2:],
-	}
-	dealerShares := protocol.Distribute(secretVector)
-	commitments := protocol.GenerateCommitments(secretVector)
+	serverShare := dealer.GetServerShare()
+	var serverShareBytes = serverShare.Bytes()
 
 	regReq := api.RegisterRequest{
 		Username:            db.MyIdentity.Name,
 		PublicKey:           walletPubkey,
-		ServerShare:         dealerShares.ServerShare,
-		PubParams:           *pubParams,
-		Commitments:         commitments,
+		ServerShare:         serverShareBytes,
+		PubParams:           dealer.GetTsParameters(),
+		Commitments:         commBytes,
 		InactivityThreshold: timeoutDur,
 	}
+
+	fmt.Printf("server share: %v\n", regReq.ServerShare)
 
 	dataBytes, _ := json.Marshal(regReq)
 	sign := ed25519.Sign(db.MyIdentity.PrivateKey, dataBytes)
@@ -518,11 +518,16 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	for i, cn := range chosenNames {
 		friendName := strings.TrimSpace(cn)
 
+		share_1 := dealer.GetParticipantShares(i)
+		shareBytes := share_1.Bytes()
+
 		share := keyexchange.ShareMessage{
 			Index:       i + 1,
-			Share:       dealerShares.ParticipantShares[i],
-			Commitments: commitments,
-			PubParams:   *pubParams,
+			Share:       shareBytes,
+			Commitments: commBytes, // TODO: fix this reversing shit
+			PubParams:   dealer.GetTsParameters(),
+			Username:    db.MyIdentity.Name,
+			WalletPub:   walletPubkey,
 		}
 
 		shareBlob, err := keyexchange.MarshalShare(share)
@@ -646,7 +651,7 @@ func loginAndUnlock(db *LocalDB) error {
 			fmt.Println("Database unlocked succesfully!")
 			return nil
 		}
-		
+
 		elapsed := time.Since(start)
 		if elapsed < targetDuration {
 			time.Sleep(targetDuration - elapsed)
@@ -661,7 +666,6 @@ func loginAndUnlock(db *LocalDB) error {
 func loadDB() *LocalDB {
 	db := &LocalDB{
 		Contacts:       make(map[string]string),
-		WatchList:      make(map[string]string),
 		MyWallets:      make(map[string]string),
 		DirectoryEpoch: 0,
 	}
@@ -680,8 +684,8 @@ func loadDB() *LocalDB {
 func printMenu(db *LocalDB) {
 	fmt.Print("\033[H\033[2J")
 	fmt.Println("==================================================================")
-	fmt.Printf(" USER: %s | CONTACTS: %d | WATCHING: %d | CREATED: %d\n",
-		db.MyIdentity.Name, len(db.Contacts), len(db.WatchList), len(db.MyWallets))
+	fmt.Printf(" USER: %s | CONTACTS: %d | CREATED: %d\n",
+		db.MyIdentity.Name, len(db.Contacts), len(db.MyWallets))
 	fmt.Println("==================================================================")
 	fmt.Println(" 1. Show My Identity (for Dealer)    4. Recover Share [DEPR]")
 	fmt.Println(" 2. Add a Contact                    5. List My Created Wallets")

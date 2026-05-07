@@ -17,12 +17,12 @@ type FriendShareInput struct {
 
 // The request to register a wallet
 type RegisterRequest struct {
-	Username            string              `json:"username"`
-	PublicKey           []byte              `json:"public_key"`
-	ServerShare         crypto.Scalar       `json:"server_share"`
-	PubParams           crypto.PublicParams `json:"public_params"`
-	Commitments         crypto.Commitments  `json:"commitments"`
-	InactivityThreshold time.Duration       `json:"inactivity_threshold"`
+	Username            string                 `json:"username"`
+	PublicKey           []byte                 `json:"public_key"`
+	ServerShare         []byte                 `json:"server_share"`
+	PubParams           crypto.ThresholdParams `json:"public_params"`
+	Commitments         [][]byte               `json:"commitments"`
+	InactivityThreshold time.Duration          `json:"inactivity_threshold"`
 }
 
 type SignedRegisterRequest struct {
@@ -83,4 +83,26 @@ type ParticipantResponse struct {
 type SignedParticipantResponse struct {
 	Data      ParticipantResponse `json:"data"`
 	Signature []byte              `json:"signature"`
+}
+
+// Signing stuff
+type SignInitRequest struct {
+	WalletPubKey   []byte               `json:"wallet_pub_key"`
+	WalletUsername string               `json:"username"`
+	ParticipantID  crypto.ParticipantID `json:"participant_id"`
+}
+
+type SignCommitment struct {
+	ParticipantID crypto.ParticipantID `json:"id"`
+	Commitment    []byte               `json:"c"`
+}
+
+type SignReveal struct {
+	ParticipantID crypto.ParticipantID `json:"id"`
+	Reveal        []byte               `json:"r"`
+}
+
+type PartialSigMessage struct {
+	ParticipantID crypto.ParticipantID `json:"id"`
+	Z             []byte               `json:"z"`
 }

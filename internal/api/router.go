@@ -21,6 +21,11 @@ var (
 	inboxMutex sync.RWMutex
 )
 
+var (
+	activeSignings = make(map[string]*crypto.Session)
+	signMu         sync.Mutex
+)
+
 // Define what the backend can do
 // Interface to swap memory more easily
 // Every WalletService var implements the following functions implicitly
@@ -128,19 +133,34 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Not sure it works perché non sappiamo se la matrice ha la colonna del server?
-	// In ogni caso VerifyShare rejecta participantID < 1 bruuuuh
-	protocol := crypto.NewProtocol(h.Alpha, req.PubParams.K, req.PubParams.N)
-	if !protocol.VerifyShare(0, req.ServerShare, req.Commitments) {
-		http.Error(w, "Could not verify server share", http.StatusUnauthorized)
+	var serverShare crypto.Scalar
+	if _, err := serverShare.SetCanonicalBytes(req.ServerShare); err != nil {
+		http.Error(w, "Invalid server share encoding", http.StatusBadRequest)
+		return
+	}
+
+	var rebuiltCommitments crypto.Commitment
+
+	for _, b := range req.Commitments {
+		p, _ := edwards25519.NewIdentityPoint().SetBytes(b)
+		rebuiltCommitments = append(rebuiltCommitments, *p)
+	}
+
+	var serverPart crypto.Server
+	serverPart.SetShare(serverShare)
+	if ok, err := serverPart.VerifyConsistency(&rebuiltCommitments); err != nil {
+		http.Error(w, "Error while verifying share.", http.StatusInternalServerError)
+		return
+	} else if !ok {
+		http.Error(w, "Share is not consistent.", http.StatusNotAcceptable)
 		return
 	}
 
 	// Map the received DTO to the model
 	wallet := &core.Wallet{
 		PublicKey:           req.PublicKey,
-		ServerShare:         req.ServerShare,
-		Commitments:         req.Commitments,
+		ServerShare:         serverShare,
+		Commitments:         rebuiltCommitments,
 		LastActivity:        time.Now(),
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold

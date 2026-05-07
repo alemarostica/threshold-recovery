@@ -35,8 +35,10 @@ type MessageSender interface {
 }
 
 type ShareMessage struct {
-	Index       int                 `json:"index"`
-	Share       crypto.Scalar       `json:"scalar"`
-	Commitments crypto.Commitments  `json:"commitments"`
-	PubParams   crypto.PublicParams `json:"public_params"`
+	Index       int                    `json:"index"`
+	Share       []byte                 `json:"scalar"`
+	Commitments [][]byte                 `json:"commitments"`
+	PubParams   crypto.ThresholdParams `json:"public_params"`
+	Username    string                 `json:"username"`
+	WalletPub   ed25519.PublicKey      `json:"wallet_pub_kex"`
 }

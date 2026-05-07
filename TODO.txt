@@ -4,4 +4,3 @@
 - cambiare status per dire solo recoverable o meno?
 - gestiamo replay sulla liveness?
 - Authentication with signature on liveness ping
-- Aggiungere hashed password locale + salt

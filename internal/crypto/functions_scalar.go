@@ -1,152 +1,112 @@
 package crypto
 
-import "filippo.io/edwards25519"
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
 
-type ParticipantID int
+	"filippo.io/edwards25519"
+)
 
-type PublicParams struct {
-	K int // soglia
-	N int // numero di partecipanti (utenti)
-	M Matrix
+func IntToBytes(i int) []byte {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint64(buf, uint64(i))
+	return buf
 }
 
-type DealerShares struct {
-	ServerShare       Scalar   // beta1
-	ParticipantShares []Scalar // gamma1,...,gamman
-}
-
-type SecretVector struct {
-	S  Scalar   // segreto
-	R2 Scalar   // coefficiente per p1
-	T  []Scalar // t1,...,t_{k-1}
-}
-
-type ReconstructionSet struct {
-	Indices []ParticipantID
-	Shares  []Scalar
-}
-
-type Protocol struct {
-	PP    PublicParams
-	Alpha Scalar
-}
-
-func NewProtocol(alpha *Scalar, k, n int) *Protocol {
-	return &Protocol{
-		PP: PublicParams{
-			K: k,
-			N: n,
-			M: BuildM(alpha, k, n),
-		},
-		Alpha: *alpha,
+func BytesToParticipantID(b []byte) (ParticipantID, error) {
+	if len(b) != 4 {
+		return 0, errors.New("invalid participant id length")
 	}
+	return ParticipantID(binary.BigEndian.Uint32(b)), nil
 }
 
-func (p *Protocol) Distribute(v SecretVector) DealerShares {
-	// beta1 = s + r2
-	var beta1 Scalar
-	beta1.Add(&v.S, &v.R2)
+func scalarOne() Scalar {
+	var one Scalar
 
-	var beta2 Scalar
-	beta2.Multiply(&v.R2, &p.Alpha)
-	beta2.Add(&beta2, &v.S)
+	b := make([]byte, 32)
+	b[0] = 1
 
-	// gamma_i = beta2 + t_1*alpha^(i-1) + t_2*alpha^(2(i-1)) + ... + t_{k-1}*alpha^((k-1)(i-1))
-	participantShares := make([]Scalar, p.PP.N)
-	for i := 0; i < p.PP.N; i++ {
-		var share Scalar
-		share.Set(&beta2)
-		for j := 0; j < p.PP.K-1; j++ {
-			var term Scalar
-			term.Multiply(&v.T[j], &p.PP.M[j+2][i+1]) // M[j+2][i+1] = alpha^((j)(i))
-			share.Add(&share, &term)
+	if _, err := one.SetCanonicalBytes(b); err != nil {
+		panic(err)
+	}
+
+	return one
+}
+
+func SetAlpha() Scalar {
+	g := new(Scalar)
+	g.SetCanonicalBytes([]byte{
+		2, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 0,
+	})
+	return *g
+}
+
+// Square and multiply by base, using exponentiation by squaring
+func ScalarPow(base *Scalar, exp uint8, s *Scalar) {
+	result := One
+	power := edwards25519.NewScalar().Set(base)
+
+	for exp > 0 {
+		if exp&1 == 1 {
+			result.Multiply(&result, power)
 		}
-		participantShares[i].Set(&share)
+
+		power.Multiply(power, power)
+		exp >>= 1
 	}
 
-	return DealerShares{
-		ServerShare:       beta1,
-		ParticipantShares: participantShares,
-	}
-
+	*s = result
+	result = Scalar{} // zeroization of result
+	*power = Scalar{} // zeroization of power
 }
 
-func CoefficientsForSecret(M Matrix, n int, indices []ParticipantID) []Scalar {
-	alpha := &M[1][1]
+func generateRandomScalar(s *Scalar) error {
 
-	one := scalarOne()
+	buf := make([]byte, 64)
 
-	var alphaMinusOne Scalar
-	alphaMinusOne.Subtract(alpha, &one) // alpha - 1
-
-	var invAlphaMinusOne Scalar
-	invAlphaMinusOne.Invert(&alphaMinusOne) // 1 / (alpha - 1)
-
-	var minusOne Scalar
-	minusOne.Negate(&one) // -1
-
-	var coeffLambda2 Scalar
-	coeffLambda2.Multiply(&minusOne, &invAlphaMinusOne) // -1 / (alpha - 1)
-
-	// vettore finale lungo n, inizialmente tutto zero
-	cis := make([]Scalar, n)
-	for i := 0; i < n; i++ {
-		cis[i].Set(edwards25519.NewScalar()) // zero
+	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+		return fmt.Errorf("generateRandomScalar failed: %w", err)
 	}
 
-	if len(indices) == 0 {
-		return cis
+	aus, err := edwards25519.NewScalar().SetUniformBytes(buf[:])
+	if err != nil {
+		*aus = Scalar{} // zeroization of aus
+		return fmt.Errorf("generateRandomScalar failed: %w", err)
 	}
+	*s = *aus
+	*aus = Scalar{} // zeroization of s
 
-	// indices è ordinato, quindi l'ultimo è il massimo
-	maxIdx := int(indices[len(indices)-1])
-	if maxIdx <= 0 || maxIdx > n {
-		panic("participant index out of range")
-	}
-
-	powers := computePowers(alpha, maxIdx)
-
-	m := len(indices)
-
-	// xs = alpha^i per i negli indici selezionati
-	xs := make([]Scalar, m)
-	for i, idx := range indices {
-		if int(idx) <= 0 || int(idx) > n {
-			panic("participant index out of range")
-		}
-		xs[i].Set(&powers[int(idx)])
-	}
-
-	// lambda puri di Lagrange:
-	// lambda_i = Π_{j != i} x_j / (x_j - x_i)
-	lambdas := make([]Scalar, m)
-	for i := 0; i < m; i++ {
-		lambdas[i].Set(&one)
-
-		for j := 0; j < m; j++ {
-			if i == j {
-				continue
-			}
-
-			var den Scalar
-			den.Subtract(&xs[j], &xs[i]) // x_j - x_i
-
-			var denInv Scalar
-			denInv.Invert(&den)
-
-			var factor Scalar
-			factor.Multiply(&xs[j], &denInv) // x_j / (x_j - x_i)
-
-			lambdas[i].Multiply(&lambdas[i], &factor)
-		}
-	}
-
-	// c_i = (-1/(alpha-1)) * lambda_i
-	// e lo mettiamo nella posizione del partecipante
-	for i, idx := range indices {
-		pos := int(idx) - 1 // partecipanti numerati da 1 a n
-		cis[pos].Multiply(&coeffLambda2, &lambdas[i])
-	}
-
-	return cis
+	return nil
 }
+
+func generateRandomScalars(scalars []Scalar) error {
+
+	buf := make([]byte, 64)
+
+	var s *Scalar
+	var err error
+
+	for i := 0; i < len(scalars); i++ {
+		if _, err := io.ReadFull(rand.Reader, buf); err != nil {
+			return fmt.Errorf("generateRandomScalars failed: %w", err)
+		}
+
+		s, err = edwards25519.NewScalar().SetUniformBytes(buf[:])
+		if err != nil {
+			*s = Scalar{} // zeroization of s
+			return fmt.Errorf("generateRandomScalars failed: %w", err)
+		}
+		scalars[i] = *s
+		*s = Scalar{} // zeroization of s
+	}
+	return nil
+}
+
+var One = scalarOne()
+var alpha = SetAlpha()
