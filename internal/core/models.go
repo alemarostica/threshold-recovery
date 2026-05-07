@@ -35,7 +35,8 @@ type Wallet struct {
 
 	// A sort of "mailbox" for other users
 	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share
-	FriendShares map[string][]byte `json:"friend_shares"`
+	FriendShares    map[string][]byte      `json:"friend_shares"`
+	ThresholdParams crypto.ThresholdParams `json:"threshold_params"`
 }
 
 // Returns whether the wallet is in a recoverable state

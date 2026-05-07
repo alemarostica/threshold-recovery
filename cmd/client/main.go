@@ -85,7 +85,9 @@ func main() {
 	}
 
 	startMessagePoller(db)
-	startLivenessPinger(db)
+	if !(db.MyIdentity == nil) && !(len(db.MyWallets) == 0) {
+		pingAllWallets(db)
+	}
 
 	// Loop
 	for {
@@ -107,6 +109,9 @@ func main() {
 			listCreatedWallets(db)
 		case "0":
 			fmt.Println("Goodbye.")
+			if !(db.MyIdentity == nil) && !(len(db.MyWallets) == 0) {
+				pingAllWallets(db)
+			}
 			return
 		default:
 			fmt.Println("Invalid Option.")
@@ -290,13 +295,12 @@ func pollRelay(db *LocalDB) {
 				continue
 			}
 
-			// TODO: Cosa dobbiamo fare? Salvare questa in DB?
-			// Tenerla salvata in execution per quando signiamo? Credo la prima
 			share := Share{
 				Username:  message.Username,
 				WalletPub: message.WalletPub,
-				// TODO: apparently non viene salvato nel json
-				// Probabilmente non va bene il formato
+				// Still la stessa roba del trasferimento di edwards25519 structs
+				// I field sono privati quindi non se li caga nessuna funzione che non sia
+				// un metodo sullo struct, bisogna quindi convertire in bytes
 				Value: partShare.Bytes(),
 				Index: message.Index,
 			}
@@ -310,20 +314,6 @@ func pollRelay(db *LocalDB) {
 		// the prompt
 		fmt.Print("\nSelect an option: ")
 	}
-}
-
-func startLivenessPinger(db *LocalDB) {
-	ticker := time.NewTicker(1 * time.Minute)
-
-	go func() {
-		for range ticker.C {
-			if db.MyIdentity == nil || len(db.MyWallets) == 0 {
-				// Either ID not setup or no wallet registered
-				continue
-			}
-			pingAllWallets(db)
-		}
-	}()
 }
 
 func pingAllWallets(db *LocalDB) {
@@ -357,9 +347,55 @@ func pingAllWallets(db *LocalDB) {
 }
 
 func initializePartialSign(db *LocalDB) {
-	fmt.Println("Received shares:")
-	for i, share := range db.ReceivedShares {
-		fmt.Printf("%d\t%s\t%v\n", i, share.Username, share.WalletPub)
+	if len(db.ReceivedShares) == 0 {
+		fmt.Println("No shares found in local database.")
+		return
+	}
+
+	// Select share
+	fmt.Println("\nAvailable shares for recovery:")
+	for i, s := range db.ReceivedShares {
+		fmt.Printf("[%d] Wallet Owner: %s (Wallet Pub: %x)\n", i, s.Username, s.WalletPub)
+	}
+	fmt.Print("Select share index: ")
+	idxStr := readInput(bufio.NewReader(os.Stdin))
+	idx, _ := strconv.Atoi(idxStr)
+
+	if idx < 0 || idx > len(db.ReceivedShares) {
+		fmt.Println("Invalid selection.")
+		return
+	}
+	selected := db.ReceivedShares[idx]
+
+	fmt.Println("Checking wallet status and joining recovery pool on server...")
+	initReq := api.SignInitRequest{
+		WalletPubKey: selected.WalletPub,
+		WalletUsername: selected.Username,
+		ParticipantID: crypto.ParticipantID(selected.Index),
+	}
+
+	// unelegant ahh polling
+	for {
+		var resp api.SignInitResponse
+		err := callAPI("POST", "/sign/init", initReq, &resp)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			return
+		}
+
+		if resp.Status == "ready" {
+			fmt.Printf("\nThreshold reached, server confirmed session\n")
+			fmt.Printf("Vector v (indices): %v\n", resp.VectorV)
+
+			// NEXT STEPS OF PROTOCOL
+			break
+		} else if resp.Status == "waiting" {
+			fmt.Printf("\rWaiting for other participants... (%d/%d)", resp.JoinedCount, resp.Threshold)
+			time.Sleep(3 * time.Second)
+		} else {
+			fmt.Printf("\nABORT: %s\n", resp.Message)
+			return
+		}
 	}
 }
 
@@ -492,8 +528,6 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		Commitments:         commBytes,
 		InactivityThreshold: timeoutDur,
 	}
-
-	fmt.Printf("server share: %v\n", regReq.ServerShare)
 
 	dataBytes, _ := json.Marshal(regReq)
 	sign := ed25519.Sign(db.MyIdentity.PrivateKey, dataBytes)

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"slices"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -16,14 +17,20 @@ import (
 	"filippo.io/edwards25519"
 )
 
+type PendingSign struct {
+	WalletPubKeyHex string
+	Threshold       int
+	TotalN          int
+	Participants    []crypto.ParticipantID
+}
+
 var (
 	inbox      = make(map[string][]keyexchange.Message)
 	inboxMutex sync.RWMutex
-)
 
-var (
-	activeSignings = make(map[string]*crypto.Session)
-	signMu         sync.Mutex
+	activeSignings  = make(map[string]*crypto.Session)
+	pendingSignings = make(map[string]*PendingSign)
+	signMu          sync.Mutex
 )
 
 // Define what the backend can do
@@ -68,6 +75,97 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /participants", h.handleGetParticipants)
 	mux.HandleFunc("POST /relay/send", h.handlePostMessage)
 	mux.HandleFunc("GET /relay/messages", h.handleGetMessages)
+	mux.HandleFunc("POST /sign/init", h.handleSignInit)
+}
+
+func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
+	var req SignInitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	participant, _, err := h.Service.GetParticipant(req.WalletUsername)
+	if err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(req.WalletPubKey, participant.PublicKey)
+	if err != nil {
+		http.Error(w, "Wallet not found", http.StatusNotFound)
+		return
+	}
+
+	if !wallet.IsRecoverable() {
+		h.Audit.Log(hex.EncodeToString(req.WalletPubKey), core.EventSignBlocked, "Attempted to sign before expiration.")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(SignInitResponse{
+			Status:  "active",
+			Message: "The wallet is still active. recovery is not yet allowed",
+		})
+		return
+	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
+
+	walletHex := hex.EncodeToString(req.WalletPubKey)
+
+	if session, active := activeSignings[walletHex]; active {
+		json.NewEncoder(w).Encode(SignInitResponse{
+			Status: "ready",
+			Message: "Session already active",
+			VectorV: session.GetIndices(),
+		})
+		return
+	}
+
+	// has session been formed?
+	pending, exists := pendingSignings[walletHex]
+	if !exists {
+		pending = &PendingSign{
+			WalletPubKeyHex: walletHex,
+			Threshold: wallet.ThresholdParams.K,
+			TotalN: wallet.ThresholdParams.N,
+			Participants: []crypto.ParticipantID{crypto.ServerID},
+		}
+		pendingSignings[walletHex] = pending
+	}
+
+	// Il partecipante partecipa già?
+	alreadyJoined := slices.Contains(pending.Participants, req.ParticipantID)
+	if !alreadyJoined {
+		pending.Participants = append(pending.Participants, req.ParticipantID)
+	}
+
+	// hit threshold?
+	if len(pending.Participants) >= pending.Threshold {
+		session, err := crypto.NewSession(pending.Participants, pending.Threshold, pending.TotalN)
+		if err != nil {
+			http.Error(w, "Failed to create crypto session", http.StatusInternalServerError)
+			return
+		}
+
+		activeSignings[walletHex] = session
+		delete(pendingSignings, walletHex)
+
+		h.Audit.Log(walletHex, core.EventSignAttempt, "Recovery threshold reached, session started.")
+		json.NewEncoder(w).Encode(SignInitResponse{
+			Status: "ready",
+			Message: "Threshold reached, session started.",
+			JoinedCount: len(pending.Participants),
+			Threshold: pending.Threshold,
+		})
+	}
+
+	json.NewEncoder(w).Encode(SignInitResponse{
+		Status: "waiting",
+		Message: "waiting for more participants",
+		JoinedCount: len(pending.Participants),
+		Threshold: pending.Threshold,
+	})
 }
 
 func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +238,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var rebuiltCommitments crypto.Commitment
-
 	for _, b := range req.Commitments {
 		p, _ := edwards25519.NewIdentityPoint().SetBytes(b)
 		rebuiltCommitments = append(rebuiltCommitments, *p)
@@ -166,6 +263,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// Default expiration = Now + Threshold
 		// TODO: change if necessary
 		ExpirationDate: time.Now().Add(req.InactivityThreshold),
+		ThresholdParams: req.PubParams,
 	}
 
 	// Save it
@@ -205,7 +303,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 
 	// Let's try to prevent replay attacks
 	requestTime := time.Unix(req.Timestamp, 0)
-	if time.Since(requestTime).Abs() > 5*time.Minute {
+	if time.Since(requestTime).Abs() < time.Minute {
 		http.Error(w, "Invalid timestamp", http.StatusUnauthorized)
 		return
 	}

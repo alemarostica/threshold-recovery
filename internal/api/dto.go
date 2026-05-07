@@ -92,6 +92,14 @@ type SignInitRequest struct {
 	ParticipantID  crypto.ParticipantID `json:"participant_id"`
 }
 
+type SignInitResponse struct {
+	Status      string                 `json:"status"`
+	Message     string                 `json:"message"`
+	VectorV     []crypto.ParticipantID `json:"vector_v,omitempty"`
+	JoinedCount int                    `json:"joined_count,omitempty"`
+	Threshold   int                    `json:"threshold,omitempty"`
+}
+
 type SignCommitment struct {
 	ParticipantID crypto.ParticipantID `json:"id"`
 	Commitment    []byte               `json:"c"`

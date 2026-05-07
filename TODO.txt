@@ -1,6 +1,3 @@
 - Check se la roba con HMAC è fatta bene o ho fatto una porcata
 - Mutual TLS o solo del server?
 - Mutex nel json_store?
-- cambiare status per dire solo recoverable o meno?
-- gestiamo replay sulla liveness?
-- Authentication with signature on liveness ping

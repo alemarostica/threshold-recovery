@@ -1,9 +1,9 @@
 package crypto
 
 import (
-	"slices"
 	"crypto/sha256"
 	"errors"
+	"sort"
 
 	"filippo.io/edwards25519"
 )
@@ -15,7 +15,9 @@ func NormalizeParticipantIDs(indices []ParticipantID, n int) ([]ParticipantID, e
 
 	cp := append([]ParticipantID(nil), indices...)
 
-	slices.Sort(cp)
+	sort.Slice(cp, func(i, j int) bool {
+		return cp[i] < cp[j]
+	})
 
 	for i := 0; i < len(cp); i++ {
 		if cp[i] < 1 || int(cp[i]) > n {
@@ -30,23 +32,23 @@ func NormalizeParticipantIDs(indices []ParticipantID, n int) ([]ParticipantID, e
 	return cp, nil
 }
 
-func Challenge(sess *Session, R Point, P Point, msg []byte) (Scalar, error) {
+func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 	if sess == nil {
-		return Scalar{}, errors.New("nil session")
+		return Scalar{}, errors.New("Challenge failed: nil session")
 	}
 	if len(sess.id) == 0 || len(sess.indexHash) == 0 {
-		return Scalar{}, errors.New("invalid session")
+		return Scalar{}, errors.New("Challenge failed: invalid session")
 	}
 	if len(msg) == 0 {
-		return Scalar{}, errors.New("empty message")
+		return Scalar{}, errors.New("Challenge failed: empty message")
 	}
 
 	// (opzionale ma consigliato)
 	if R.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return Scalar{}, errors.New("invalid R (identity)")
+		return Scalar{}, errors.New("Challenge failed: invalid R (identity)")
 	}
 	if P.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return Scalar{}, errors.New("invalid public key")
+		return Scalar{}, errors.New("Challenge failed: invalid public key")
 	}
 
 	h := sha256.New()
@@ -67,246 +69,14 @@ func Challenge(sess *Session, R Point, P Point, msg []byte) (Scalar, error) {
 	// hardening opzionale: evita e = 0
 	var zero Scalar
 	if e.Equal(&zero) == 1 {
-		return Scalar{}, errors.New("challenge is zero")
+		return Scalar{}, errors.New("Challenge failed: challenge is zero")
 	}
 
 	return e, nil
 }
 
-func (ps *ParticipantSigner) PartialSign(msg []byte) error {
-
-	var zero Scalar
-
-	share := ps.p.GetShare()
-	lambda := ps.p.GetLagrangeCoefficient()
-
-	ri, err := ps.n.Getri()
-	if err != nil {
-		return err
-	}
-
-	if share.Equal(&zero) == 1 {
-		return errors.New("missing share")
-	}
-
-	if lambda.Equal(&zero) == 1 {
-		return errors.New("missing lambda")
-	}
-
-	if ri.Equal(&zero) == 1 {
-		return errors.New("missing ri")
-	}
-
-	// Compute the challenge
-	e, err := Challenge(&ps.sess, ps.R, ps.P, msg)
-	if err != nil {
-		return err
-	}
-
-	// compute term = e*lambda*share
-	var term Scalar
-	term.Multiply(&lambda, &share)
-	term.Multiply(&term, &e)
-
-	// compute z = ri + term
-	var z Scalar
-	z.Add(&ri, &term)
-
-	ps.partialSig = WirePartialSignature{
-		Index: IntToBytes(int(ps.p.GetID())),
-		Z:     z.Bytes(),
-	}
-
-	return nil
-}
-
-func (ss *ServerSigner) PartialSign(msg []byte) error {
-
-	var zero Scalar
-
-	share := ss.s.GetShare()
-	lambda := ss.s.GetLagrangeCoefficient()
-
-	ri, err := ss.n.Getri()
-	if err != nil {
-		return err
-	}
-
-	if share.Equal(&zero) == 1 {
-		return errors.New("missing share")
-	}
-
-	if lambda.Equal(&zero) == 1 {
-		return errors.New("missing lambda")
-	}
-
-	if ri.Equal(&zero) == 1 {
-		return errors.New("missing ri")
-	}
-
-	// Compute the challenge
-	e, err := Challenge(&ss.sess, ss.R, ss.P, msg)
-	if err != nil {
-		return err
-	}
-
-	// compute term = e*lambda*share
-	var term Scalar
-	term.Multiply(&lambda, &share)
-	term.Multiply(&term, &e)
-
-	// compute z = ri + term
-	var z Scalar
-	z.Add(&ri, &term)
-
-	ss.partialSig = WirePartialSignature{
-		Index: IntToBytes(int(ServerID)),
-		Z:     z.Bytes(),
-	}
-
-	return nil
-}
-
-func (ps *ParticipantSigner) CombineSignature(
-	partials map[ParticipantID]WirePartialSignature,
-	signers []ParticipantID,
-) error {
-
-	// da togliere?
-	if len(signers) != len(partials) {
-		return errors.New("incomplete signer set")
-	}
-
-	Rpoint := ps.GetR()
-
-	// Reject identity point
-	if Rpoint.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return errors.New("invalid R (identity point)")
-	}
-
-	// Aggregate all partial z values
-	var z Scalar
-
-	seen := make(map[ParticipantID]bool)
-
-	for _, id := range signers {
-
-		// Duplicate signer check
-		if seen[id] {
-			return errors.New("duplicate partial signature")
-		}
-		seen[id] = true
-
-		psig, ok := partials[id]
-		if !ok {
-			return errors.New("missing partial signature")
-		}
-
-		idx, err := BytesToParticipantID(psig.Index)
-		if err != nil {
-			return err
-		}
-
-		if idx != id {
-			return errors.New("partial signature index mismatch")
-		}
-
-		// Decode scalar z_i
-		var zi Scalar
-		if _, err := zi.SetCanonicalBytes(psig.Z); err != nil {
-			return errors.New("invalid partial scalar encoding")
-		}
-
-		// z = z + z_i
-		z.Add(&z, &zi)
-	}
-
-	var zero Scalar
-	if z.Equal(&zero) == 1 {
-		return errors.New("invalid signature scalar (z = 0)")
-	}
-
-	// Set the signature
-	ps.finalSig = WireSignature{
-		R: Rpoint.Bytes(),
-		Z: z.Bytes(),
-	}
-
-	return nil
-}
-
-func (ss *ServerSigner) CombineSignature(
-	partials map[ParticipantID]WirePartialSignature,
-	signers []ParticipantID,
-) error {
-
-	// da togliere?
-	if len(signers) != len(partials) {
-		return errors.New("incomplete signer set")
-	}
-
-	Rpoint := ss.GetR()
-
-	// Reject identity point
-	if Rpoint.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return errors.New("invalid R (identity point)")
-	}
-
-	// Aggregate all partial z values
-	var z Scalar
-
-	seen := make(map[ParticipantID]bool)
-
-	for _, id := range signers {
-
-		// Duplicate signer check
-		if seen[id] {
-			return errors.New("duplicate partial signature")
-		}
-		seen[id] = true
-
-		// Check partial exists
-		psig, ok := partials[id]
-		if !ok {
-			return errors.New("missing partial signature")
-		}
-
-		idx, err := BytesToParticipantID(psig.Index)
-		if err != nil {
-			return err
-		}
-
-		if idx != id {
-			return errors.New("partial signature index mismatch")
-		}
-
-		// Decode scalar z_i
-		var zi Scalar
-		if _, err := zi.SetCanonicalBytes(psig.Z); err != nil {
-			return errors.New("invalid partial scalar encoding")
-		}
-
-		// z = z + z_i
-		z.Add(&z, &zi)
-	}
-
-	// Reject zero final scalar
-	var zero Scalar
-	if z.Equal(&zero) == 1 {
-		return errors.New("invalid signature scalar (z = 0)")
-	}
-
-	// Set the signature
-	ss.finalSig = WireSignature{
-		R: Rpoint.Bytes(),
-		Z: z.Bytes(),
-	}
-
-	return nil
-}
-
 // se la vogliamo lasciare come funzione è ok
-func VerifySignature(P []byte, msg []byte, sig WireSignature, sess Session) bool {
+/*func VerifySignature(P []byte, msg []byte, sig Signature, sess Session) bool {
 
 	// Basic input validation
 	if len(sess.id) == 0 || len(sess.indexHash) == 0 {
@@ -336,7 +106,7 @@ func VerifySignature(P []byte, msg []byte, sig WireSignature, sess Session) bool
 	}
 
 	// Recompute challenge
-	e, err := Challenge(&sess, Rpoint, Ppoint, msg)
+	e, err := Challenge(&sess, &Rpoint, &Ppoint, msg)
 	if err != nil {
 		return false
 	}
@@ -366,6 +136,7 @@ func VerifySignature(P []byte, msg []byte, sig WireSignature, sess Session) bool
 	// Final check
 	return zG.Equal(&rhs) == 1
 }
+*/
 
 // se la vogliammo scrivere come metodo (per ora su ParticipantSigner)
 // nel caso: fare anche il setter se vogliamo aggiungere l'output alle struct

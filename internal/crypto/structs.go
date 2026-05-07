@@ -189,10 +189,9 @@ func (d *Dealer) GetServerShare() Scalar {
 
 // Participant (user)
 type Participant struct {
-	id                  ParticipantID
-	name                string
-	share               Scalar
-	lagrangeCoefficient Scalar
+	id    ParticipantID
+	name  string
+	share Scalar
 }
 
 func (p *Participant) SetID(id ParticipantID) error {
@@ -295,56 +294,18 @@ func (p *Participant) VerifyConsistency(comm Commitment) (bool, error) {
 	}
 }
 
-func (p *Participant) SetLagrangeCoefficient(ids []ParticipantID) {
-	// if p.id is not in ids, then p.lagrangeCoefficient = 0
-	m := map[ParticipantID]bool{}
-	for _, id := range ids {
-		m[id] = true
-	}
-	// if p.id is not in ids, then p.lagrangeCoefficient = 0,
-	// because p does not participate in the reconstruction and therefore
-	// his share does not contribute to the reconstruction of the secret
-
-	if !m[p.id] {
-		p.lagrangeCoefficient = Scalar{}
-		return
-	}
-	var aus Scalar
-	p.lagrangeCoefficient.Set(&One)                              // coeff = one
-	aus.Set(&One)                                                // aus = one
-	aus.Subtract(&aus, &alpha)                                   // aus = 1-alpha
-	aus.Invert(&aus)                                             // aus = 1/(1-alpha)
-	p.lagrangeCoefficient.Multiply(&p.lagrangeCoefficient, &aus) // coeff = alpha / (1 - alpha)
-
-	var term Scalar
-	term.Set(&One) // term = one
-	for _, id := range ids {
-		if id == p.id {
-			continue
-		} else {
-			var aus2 Scalar
-			var aus3 Scalar
-			aus2.Set(&One)
-			ScalarPow(&alpha, uint8(id-1), &aus2)
-			aus3.Set(&One)
-			ScalarPow(&alpha, uint8(p.id-1), &aus3)
-			aus3.Subtract(&aus3, &aus2) // aus3 = alpha^{id-1} - alpha^{p.id-1}
-			aus3.Invert(&aus3)          // aus3 = 1/(alpha^{id-1} - alpha^{p.id-1})
-			aus2.Multiply(&aus2, &aus3) // aus2 = alpha^{id-1} / (alpha^{id-1} - alpha^{p.id-1})
-			term.Multiply(&term, &aus2)
-		}
-	}
-	p.lagrangeCoefficient.Multiply(&p.lagrangeCoefficient, &term) // coeff = alpha / (1 - alpha) * product_{j!=i} (alpha^{id-1} / (alpha^{id-1} - alpha^{p.id-1}))
-}
-
-func (p *Participant) GetLagrangeCoefficient() Scalar {
-	return p.lagrangeCoefficient
-}
-
 // Server
 type Server struct {
-	share               Scalar
-	lagrangeCoefficient Scalar
+	share  Scalar
+	params ThresholdParams
+}
+
+func (s *Server) SetParams(par *ThresholdParams) {
+	s.params = *par
+}
+
+func (s *Server) GetParams() ThresholdParams {
+	return s.params
 }
 
 func (s *Server) SetShare(share Scalar) {
@@ -353,19 +314,6 @@ func (s *Server) SetShare(share Scalar) {
 
 func (s *Server) GetShare() Scalar {
 	return s.share
-}
-
-func (s *Server) SetLagrangeCoefficient([]ParticipantID) {
-	var aus Scalar
-	s.lagrangeCoefficient.Set(&alpha)                            // coeff = alpha
-	aus.Set(&alpha)                                              // aus = alpha
-	aus.Subtract(&aus, &One)                                     // aus = alpha - 1
-	aus.Invert(&aus)                                             // aus = 1/(alpha - 1)
-	s.lagrangeCoefficient.Multiply(&s.lagrangeCoefficient, &aus) // coeff = alpha / (alpha - 1)
-}
-
-func (s *Server) GetLagrangeCoefficient() Scalar {
-	return s.lagrangeCoefficient
 }
 
 func (s *Server) VerifyConsistency(comm *Commitment) (bool, error) {
