@@ -369,9 +369,9 @@ func initializePartialSign(db *LocalDB) {
 
 	fmt.Println("Checking wallet status and joining recovery pool on server...")
 	initReq := api.SignInitRequest{
-		WalletPubKey: selected.WalletPub,
+		WalletPubKey:   selected.WalletPub,
 		WalletUsername: selected.Username,
-		ParticipantID: crypto.ParticipantID(selected.Index),
+		ParticipantID:  crypto.ParticipantID(selected.Index),
 	}
 
 	// unelegant ahh polling
@@ -387,7 +387,31 @@ func initializePartialSign(db *LocalDB) {
 			fmt.Printf("\nThreshold reached, server confirmed session\n")
 			fmt.Printf("Vector v (indices): %v\n", resp.VectorV)
 
-			// NEXT STEPS OF PROTOCOL
+			// reconstruct data
+			var part crypto.Participant
+			part.SetID(crypto.ParticipantID(selected.Index))
+			part.SetName(selected.Username)
+
+			var shareScalar crypto.Scalar
+			if _, err := shareScalar.SetCanonicalBytes(selected.Value); err != nil {
+				fmt.Printf("Failed to load share scalar: %v\n", err)
+				return
+			}
+			part.SetShare(shareScalar)
+
+			var ps crypto.ParticipantSigner
+			ps.SetParticipant(&part)
+			ps.SetIndices(resp.VectorV)
+			ps.SetLagrangeCoefficient()
+			point,_  := new(crypto.Point).SetBytes(resp.P)
+			ps.SetP(*point)
+			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
+
+			var session crypto.Session
+			session.SetID(resp.SessionID)
+			session.SetIndices(resp.VectorV)
+			session.SetIndexHash(resp.VectorV)
+
 			break
 		} else if resp.Status == "waiting" {
 			fmt.Printf("\rWaiting for other participants... (%d/%d)", resp.JoinedCount, resp.Threshold)
@@ -520,6 +544,9 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	serverShare := dealer.GetServerShare()
 	var serverShareBytes = serverShare.Bytes()
 
+	secret := dealer.GetSecret()
+	point := *new(crypto.Point).ScalarBaseMult(&secret)
+
 	regReq := api.RegisterRequest{
 		Username:            db.MyIdentity.Name,
 		PublicKey:           walletPubkey,
@@ -527,6 +554,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		PubParams:           dealer.GetTsParameters(),
 		Commitments:         commBytes,
 		InactivityThreshold: timeoutDur,
+		P:                   point.Bytes(),
 	}
 
 	dataBytes, _ := json.Marshal(regReq)

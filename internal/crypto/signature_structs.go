@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"slices"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -18,19 +19,27 @@ type Session struct {
 }
 
 func (s *Session) HasParticipant(id ParticipantID) bool {
-	for _, x := range s.indices {
-		if x == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.indices, id)
 }
 
+func (s *Session) HasSigner(id ParticipantID) bool {
+	if id == ServerID {
+		return true
+	}
+	return s.HasParticipant(id)
+}
+
+// Spero questa cosa vada bene in go lmao
 func (s *Session) SetID(id []byte) error {
 	sid := make([]byte, 32)
-	if _, err := rand.Read(sid); err != nil {
-		return err
+	if id == nil {
+		if _, err := rand.Read(sid); err != nil {
+			return err
+		}	
+	} else {
+		sid = id
 	}
+	
 	s.id = sid
 	return nil
 }
@@ -49,7 +58,7 @@ func (s *Session) GetIndices() []ParticipantID {
 	return out
 }
 
-func (s *Session) SetIndexHash(ids []byte) {
+func (s *Session) SetIndexHash(ids []ParticipantID) {
 	h := sha256.New()
 	tmp := make([]byte, 4)
 
@@ -121,7 +130,7 @@ func (n *NonceShare) GetIndex() ParticipantID {
 }
 
 func (n *NonceShare) Setri() error {
-	err := generateRandomScalar(&n.ri)
+	err := GenerateRandomScalar(&n.ri)
 	if err != nil {
 		return err
 	}
@@ -137,9 +146,11 @@ func (n *NonceShare) SetRi() error {
 	if !n.set_ri {
 		return errors.New("n.SetRi failed: ri is not set")
 	}
-	var Ri *Point
-	Ri = Ri.ScalarBaseMult(&n.ri)
-	n.Ri = *Ri
+
+	var Ri Point
+	Ri.ScalarBaseMult(&n.ri)
+
+	n.Ri = Ri
 	n.setRi = true
 	return nil
 }
@@ -218,6 +229,7 @@ type ParticipantSigner struct {
 	p                   Participant
 	P                   Point
 	indices             []ParticipantID
+	indicesSet          bool
 	lagrangeCoefficient Scalar
 	R                   Point
 	n                   NonceShare
@@ -228,20 +240,22 @@ type ParticipantSigner struct {
 	finalSig            Signature
 }
 
-func (ps *ParticipantSigner) SetLagrangeCoefficient() {
-	// if p.id is not in ids, then p.lagrangeCoefficient = 0
-	m := map[ParticipantID]bool{}
-	for _, id := range ps.indices {
-		m[id] = true
+func (ps *ParticipantSigner) SetLagrangeCoefficient() error {
+	if !ps.indicesSet {
+		return errors.New("ps.SetLagrangeCoefficient failed: indices not set")
 	}
-	// if p.id is not in ids, then p.lagrangeCoefficient = 0,
-	// because p does not participate in the reconstruction and therefore
-	// his share does not contribute to the reconstruction of the secret
 
-	if !m[ps.p.id] {
-		ps.lagrangeCoefficient = Scalar{}
-		return
+	psIsPresent := false
+	for _, id := range ps.indices {
+		if id == ps.p.id {
+			psIsPresent = true
+		}
 	}
+
+	if !psIsPresent {
+		return errors.New("ps.SetLagrangeCoefficient failed: current participant is not a signer")
+	}
+
 	var aus Scalar
 	ps.lagrangeCoefficient.Set(&One)                               // coeff = one
 	aus.Set(&One)                                                  // aus = one
@@ -268,6 +282,7 @@ func (ps *ParticipantSigner) SetLagrangeCoefficient() {
 		}
 	}
 	ps.lagrangeCoefficient.Multiply(&ps.lagrangeCoefficient, &term) // coeff = alpha / (1 - alpha) * product_{j!=i} (alpha^{id-1} / (alpha^{id-1} - alpha^{p.id-1}))
+	return nil
 }
 
 func (ps *ParticipantSigner) GetLagrangeCoefficient() Scalar {
@@ -297,10 +312,23 @@ func (ps *ParticipantSigner) GetP() Point {
 
 func (ps *ParticipantSigner) SetIndices(inds []ParticipantID) {
 	ps.indices = inds
+	ps.indicesSet = true
 }
 
 func (ps *ParticipantSigner) GetIndices() []ParticipantID {
 	return ps.indices
+}
+
+func (ps *ParticipantSigner) SetSession(sess *Session) error {
+	if sess == nil {
+		return errors.New("ps.SetSession failed: nil session")
+	}
+	ps.sess = *sess
+	return nil
+}
+
+func (ps *ParticipantSigner) GetSession() Session {
+	return ps.sess
 }
 
 func (ps *ParticipantSigner) SetN(n NonceShare) {
@@ -352,14 +380,13 @@ func (ps *ParticipantSigner) VerifyNonce(mat1 *MaterialToSend1, mat2 *MaterialTo
 }
 
 func (ps *ParticipantSigner) SetR(mat2 []MaterialToSend2) error {
-	var R Point
+	ps.R = *edwards25519.NewIdentityPoint()
 	for _, riBytes := range mat2 {
 		if !riBytes.setIndex || !riBytes.setRi {
 			return errors.New("ps.SetR failed: the material is incomplete")
 		}
-		R.Add(&R, &riBytes.Ri)
+		ps.R.Add(&ps.R, &riBytes.Ri)
 	}
-	ps.R = R
 	return nil
 }
 
@@ -394,6 +421,11 @@ func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 		return err
 	}
 
+	fmt.Printf("sign R: %x\n", ps.R.Bytes())
+	fmt.Printf("sign P: %x\n", ps.P.Bytes())
+	fmt.Printf("sign sess.id: %x\n", ps.sess.GetID())
+	fmt.Printf("sign sess.indexHash: %x\n", ps.sess.GetIndexHash())
+
 	// compute term = e*lambda*share
 	var term Scalar
 	term.Multiply(&lambda, &share)
@@ -404,8 +436,10 @@ func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 	z.Add(&ri, &term)
 
 	ps.partialSig = PartialSignature{
-		Index: ps.p.GetID(),
-		Z:     z,
+		Index:    ps.p.GetID(),
+		setIndex: true,
+		Z:        z,
+		setZ:     true,
 	}
 
 	return nil
@@ -425,35 +459,48 @@ func (ps *ParticipantSigner) CombineSignature(parSig []PartialSignature) error {
 		return errors.New("ps.CombineSignature failed: invalid R (identity point)")
 	}
 
+	expected := make(map[ParticipantID]bool)
+	for _, id := range ps.indices {
+		expected[id] = false
+	}
+
+	ownID := ps.p.GetID()
+	if _, ok := expected[ownID]; !ok {
+		return errors.New("ps.CombineSignature failed: own ID is not in signer set")
+	}
+	expected[ownID] = true
+
 	// Aggregate all partial z values
 	z := ps.partialSig.Z
 
 	for _, el := range parSig {
-
 		if !el.setIndex || !el.setZ {
 			return errors.New("ps.CombineSignature failed: input is not complete")
 		}
 
-		for _, pId := range ps.indices {
-			if pId == el.Index {
-				pId = 0
-			}
+		seen, ok := expected[el.Index]
+		if !ok {
+			return errors.New("ps.CombineSignature failed: unexpected partial signature index")
 		}
+		if seen {
+			return errors.New("ps.CombineSignature failed: duplicate partial signature index")
+		}
+
+		expected[el.Index] = true
 		z.Add(&z, &el.Z)
 	}
 
-	for _, pId := range ps.indices {
-		if pId != 0 {
-			return errors.New("ps.CombineSignature failed: ID mismatch between ps.indeces and partial signatures received")
+	for id, seen := range expected {
+		if !seen {
+			return fmt.Errorf("ps.CombineSignature failed: missing partial signature from index %d", id)
 		}
 	}
 
 	var zero Scalar
 	if z.Equal(&zero) == 1 {
-		return errors.New("ps.CombineSignature failed: invalid signature scalar (z = 0)")
+		return errors.New("ps.CombineSignature failed: invalid signature scalar z = 0")
 	}
 
-	// Set the signature
 	ps.finalSig = Signature{
 		R: ps.R,
 		Z: z,
@@ -474,6 +521,7 @@ type ServerSigner struct {
 	R                   Point
 	n                   NonceShare
 	indices             []ParticipantID
+	indicesSet          bool
 	sess                Session
 	materialToSend1     MaterialToSend1  // material to send to others at first
 	materialToSend2     MaterialToSend2  // material to send to others at second
@@ -497,17 +545,33 @@ func (ss *ServerSigner) GetP() Point {
 	return ss.P
 }
 
-func (ss *ServerSigner) SetLagrangeCoefficient() {
+func (ss *ServerSigner) SetLagrangeCoefficient() error {
+	if !ss.indicesSet {
+		return errors.New("ps.SetLagrangeCoefficient failed: indices not set")
+	}
 	var aus Scalar
 	ss.lagrangeCoefficient.Set(&alpha)                             // coeff = alpha
 	aus.Set(&alpha)                                                // aus = alpha
 	aus.Subtract(&aus, &One)                                       // aus = alpha - 1
 	aus.Invert(&aus)                                               // aus = 1/(alpha - 1)
 	ss.lagrangeCoefficient.Multiply(&ss.lagrangeCoefficient, &aus) // coeff = alpha / (alpha - 1)
+	return nil
 }
 
 func (ss *ServerSigner) GetLagrangeCoefficient() Scalar {
 	return ss.lagrangeCoefficient
+}
+
+func (ss *ServerSigner) SetSession(sess *Session) error {
+	if sess == nil {
+		return errors.New("ss.SetSession failed: nil session")
+	}
+	ss.sess = *sess
+	return nil
+}
+
+func (ss *ServerSigner) GetSession() Session {
+	return ss.sess
 }
 
 func (ss *ServerSigner) SetNonce(n NonceShare) {
@@ -520,6 +584,7 @@ func (ss *ServerSigner) GetNonce() NonceShare {
 
 func (ss *ServerSigner) SetIndices(ind []ParticipantID) {
 	ss.indices = ind
+	ss.indicesSet = true
 }
 
 func (ss *ServerSigner) GetIndices() []ParticipantID {
@@ -551,14 +616,13 @@ func (ss *ServerSigner) VerifyNonce(mat *MaterialToSend1, Ri Point) (bool, error
 }
 
 func (ss *ServerSigner) SetR(mat2 []MaterialToSend2) error {
-	var R Point
+	ss.R = *edwards25519.NewIdentityPoint()
 	for _, riBytes := range mat2 {
 		if !riBytes.setIndex || !riBytes.setRi {
 			return errors.New("ss.SetR failed: the material is incomplete")
 		}
-		R.Add(&R, &riBytes.Ri)
+		ss.R.Add(&ss.R, &riBytes.Ri)
 	}
-	ss.R = R
 	return nil
 }
 
@@ -590,7 +654,7 @@ func (ss *ServerSigner) SetPartialSignature(msg []byte) error {
 	// Compute the challenge
 	e, err := Challenge(&ss.sess, &ss.R, &ss.P, msg)
 	if err != nil {
-		return err
+		return fmt.Errorf("Challenge failed: %w", err)
 	}
 
 	// compute term = e*lambda*share
@@ -603,8 +667,10 @@ func (ss *ServerSigner) SetPartialSignature(msg []byte) error {
 	z.Add(&ri, &term)
 
 	ss.partialSig = PartialSignature{
-		Index: ServerID,
-		Z:     z,
+		Index:    ServerID,
+		setIndex: true,
+		Z:        z,
+		setZ:     true,
 	}
 
 	return nil
@@ -615,44 +681,66 @@ func (ss *ServerSigner) GetPartialSignature() PartialSignature {
 }
 
 func (ss *ServerSigner) CombineSignature(parSig []PartialSignature) error {
-	if len(parSig) != ss.s.params.K {
+	if !ss.indicesSet {
+		return errors.New("ss.CombineSignature failed: indices not set")
+	}
+
+	if len(parSig) != len(ss.indices) {
 		return errors.New("ss.CombineSignature failed: invalid number of partial signatures")
 	}
 
-	// Reject identity point
-	if ss.R.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return errors.New("ss.CombineSignature failed: invalid R (identity point)")
+	if !ss.partialSig.setIndex || !ss.partialSig.setZ {
+		return errors.New("ss.CombineSignature failed: own partial signature is not set")
 	}
 
-	// Aggregate all partial z values
+	if ss.partialSig.Index != ServerID {
+		return errors.New("ss.CombineSignature failed: own partial signature has invalid server index")
+	}
+
+	if ss.R.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return errors.New("ss.CombineSignature failed: invalid R identity point")
+	}
+
+	expected := make(map[ParticipantID]bool)
+
+	for _, id := range ss.indices {
+		if expected[id] {
+			return errors.New("ss.CombineSignature failed: duplicate index in signer set")
+		}
+		expected[id] = false
+	}
+
 	z := ss.partialSig.Z
 
 	for _, el := range parSig {
-
 		if !el.setIndex || !el.setZ {
-			return errors.New("ss.CombineSignature failed: input is not complete")
+			return errors.New("ss.CombineSignature failed: input partial signature is not complete")
 		}
 
-		for _, pId := range ss.indices {
-			if pId == el.Index {
-				pId = 0
-			}
+		seen, ok := expected[el.Index]
+		if !ok {
+			return fmt.Errorf("ss.CombineSignature failed: unexpected partial signature index %d", el.Index)
 		}
+
+		if seen {
+			return fmt.Errorf("ss.CombineSignature failed: duplicate partial signature for index %d", el.Index)
+		}
+
+		expected[el.Index] = true
 		z.Add(&z, &el.Z)
 	}
 
-	for _, pId := range ss.indices {
-		if pId != 0 {
-			return errors.New("ss.CombineSignature failed: ID mismatch between ps.indeces and partial signatures received")
+	for id, seen := range expected {
+		if !seen {
+			return fmt.Errorf("ss.CombineSignature failed: missing partial signature from index %d", id)
 		}
 	}
 
 	var zero Scalar
 	if z.Equal(&zero) == 1 {
-		return errors.New("ss.CombineSignature failed: invalid signature scalar (z = 0)")
+		return errors.New("ss.CombineSignature failed: invalid signature scalar z = 0")
 	}
 
-	// Set the signature
 	ss.finalSig = Signature{
 		R: ss.R,
 		Z: z,

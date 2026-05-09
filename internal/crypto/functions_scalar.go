@@ -66,7 +66,7 @@ func ScalarPow(base *Scalar, exp uint8, s *Scalar) {
 	*power = Scalar{} // zeroization of power
 }
 
-func generateRandomScalar(s *Scalar) error {
+func GenerateRandomScalar(s *Scalar) error {
 
 	buf := make([]byte, 64)
 
@@ -85,7 +85,7 @@ func generateRandomScalar(s *Scalar) error {
 	return nil
 }
 
-func generateRandomScalars(scalars []Scalar) error {
+func GenerateRandomScalars(scalars []Scalar) error {
 
 	buf := make([]byte, 64)
 

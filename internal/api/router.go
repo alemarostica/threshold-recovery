@@ -2,12 +2,12 @@
 package api
 
 import (
-	"slices"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"threshold-recovery/internal/core"
 	"threshold-recovery/internal/crypto"
@@ -28,7 +28,9 @@ var (
 	inbox      = make(map[string][]keyexchange.Message)
 	inboxMutex sync.RWMutex
 
-	activeSignings  = make(map[string]*crypto.Session)
+	// a bit controintuitivo perché il signer ha dentro la sessione e non viceversa
+	// but oh well
+	activeSignings  = make(map[string]*crypto.ServerSigner)
 	pendingSignings = make(map[string]*PendingSign)
 	signMu          sync.Mutex
 )
@@ -113,11 +115,13 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 
 	walletHex := hex.EncodeToString(req.WalletPubKey)
 
-	if session, active := activeSignings[walletHex]; active {
+	if signingSession, active := activeSignings[walletHex]; active {
+		session := signingSession.GetSession()
 		json.NewEncoder(w).Encode(SignInitResponse{
-			Status: "ready",
-			Message: "Session already active",
-			VectorV: session.GetIndices(),
+			Status:    "ready",
+			Message:   "Session already active",
+			SessionID: session.GetID(),
+			VectorV:   session.GetIndices(),
 		})
 		return
 	}
@@ -127,9 +131,9 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	if !exists {
 		pending = &PendingSign{
 			WalletPubKeyHex: walletHex,
-			Threshold: wallet.ThresholdParams.K,
-			TotalN: wallet.ThresholdParams.N,
-			Participants: []crypto.ParticipantID{crypto.ServerID},
+			Threshold:       wallet.ThresholdParams.K,
+			TotalN:          wallet.ThresholdParams.N,
+			Participants:    []crypto.ParticipantID{crypto.ServerID},
 		}
 		pendingSignings[walletHex] = pending
 	}
@@ -148,23 +152,42 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		activeSignings[walletHex] = session
+		var serverPart crypto.Server
+		serverPart.SetShare(wallet.ServerShare)
+		serverPart.SetParams(&wallet.ThresholdParams)
+
+		var ss crypto.ServerSigner
+		ss.SetServer(serverPart)
+		ss.SetIndices(session.GetIndices())
+		ss.SetSession(session)
+		ss.SetLagrangeCoefficient()
+		point, _ := new(crypto.Point).SetBytes(wallet.P)
+		ss.SetP(*point)
+
+		// what is this indexhash all about?
+		session.SetIndexHash(ss.GetIndices())
+		session.SetID(nil) // bit ugly?
+
+		activeSignings[walletHex] = &ss
 		delete(pendingSignings, walletHex)
 
 		h.Audit.Log(walletHex, core.EventSignAttempt, "Recovery threshold reached, session started.")
 		json.NewEncoder(w).Encode(SignInitResponse{
-			Status: "ready",
-			Message: "Threshold reached, session started.",
+			Status:      "ready",
+			Message:     "Threshold reached, session started.",
+			VectorV:     session.GetIndices(),
 			JoinedCount: len(pending.Participants),
-			Threshold: pending.Threshold,
+			Threshold:   pending.Threshold,
+			SessionID:   session.GetID(),
+			// Ci va il point anche qua
 		})
 	}
 
 	json.NewEncoder(w).Encode(SignInitResponse{
-		Status: "waiting",
-		Message: "waiting for more participants",
+		Status:      "waiting",
+		Message:     "waiting for more participants",
 		JoinedCount: len(pending.Participants),
-		Threshold: pending.Threshold,
+		Threshold:   pending.Threshold,
 	})
 }
 
@@ -262,7 +285,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold
 		// TODO: change if necessary
-		ExpirationDate: time.Now().Add(req.InactivityThreshold),
+		ExpirationDate:  time.Now().Add(req.InactivityThreshold),
 		ThresholdParams: req.PubParams,
 	}
 

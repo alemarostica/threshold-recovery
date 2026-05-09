@@ -30,6 +30,7 @@ type Wallet struct {
 
 	// Cryptography stuff
 	// The server's share, locked unless policy allows access
+	// TODO: porcodiaz c'é da trasformare in byte anche sta roba
 	ServerShare crypto.Scalar     `json:"server_share"`
 	Commitments crypto.Commitment `json:"commitments"`
 
@@ -37,6 +38,7 @@ type Wallet struct {
 	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share
 	FriendShares    map[string][]byte      `json:"friend_shares"`
 	ThresholdParams crypto.ThresholdParams `json:"threshold_params"`
+	P               []byte                 `json:"point"`
 }
 
 // Returns whether the wallet is in a recoverable state

@@ -26,7 +26,7 @@ func VerifyNonceAux(sess *Session, index ParticipantID, commit []byte, Ri Point)
 		return false, errors.New("VerifyNonceAux failed: sess is nil")
 	}
 
-	if !sess.HasParticipant(index) {
+	if !sess.HasSigner(index) {
 		return false, errors.New("VerifyNonceAux failed: index is not a participant of the session")
 	}
 

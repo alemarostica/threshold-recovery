@@ -23,6 +23,7 @@ type RegisterRequest struct {
 	PubParams           crypto.ThresholdParams `json:"public_params"`
 	Commitments         [][]byte               `json:"commitments"`
 	InactivityThreshold time.Duration          `json:"inactivity_threshold"`
+	P                   []byte                 `json:"point"`
 }
 
 type SignedRegisterRequest struct {
@@ -95,9 +96,11 @@ type SignInitRequest struct {
 type SignInitResponse struct {
 	Status      string                 `json:"status"`
 	Message     string                 `json:"message"`
+	SessionID   []byte                 `json:"session,omitempty"`
 	VectorV     []crypto.ParticipantID `json:"vector_v,omitempty"`
 	JoinedCount int                    `json:"joined_count,omitempty"`
 	Threshold   int                    `json:"threshold,omitempty"`
+	P           []byte                 `json:"point"`
 }
 
 type SignCommitment struct {

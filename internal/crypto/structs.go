@@ -25,12 +25,12 @@ type SecretVector struct {
 
 func (sv *SecretVector) SetSecretVector(s Scalar, k int) error {
 	sv.s = s
-	err := generateRandomScalar(&sv.r2)
+	err := GenerateRandomScalar(&sv.r2)
 	if err != nil {
 		return fmt.Errorf("sv.SetSecretVector failed: %w", err)
 	}
 	sv.t = make([]Scalar, k-1)
-	err = generateRandomScalars(sv.t)
+	err = GenerateRandomScalars(sv.t)
 	if err != nil {
 		return fmt.Errorf("sv.SetSecretVector failed: %w", err)
 	}
@@ -83,7 +83,7 @@ func (d *Dealer) GetTsParameters() ThresholdParams {
 }
 
 func (d *Dealer) SetSecret() error {
-	err := generateRandomScalar(&d.secret)
+	err := GenerateRandomScalar(&d.secret)
 	if err != nil {
 		return fmt.Errorf("d.SetSecret failed: %w", err)
 	}
