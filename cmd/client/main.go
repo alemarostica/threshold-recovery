@@ -407,11 +407,54 @@ func initializePartialSign(db *LocalDB) {
 			ps.SetP(*point)
 			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
 
-			var session crypto.Session
+			var session *crypto.Session
 			session.SetID(resp.SessionID)
 			session.SetIndices(resp.VectorV)
 			session.SetIndexHash(resp.VectorV)
 
+			var nonce crypto.NonceShare
+			if err := nonce.SetIndex(ps.GetParticipant().GetID()); err != nil {
+				fmt.Printf("Signing error: %v\n", err)
+				break
+			}
+
+			if err := nonce.Setri(); err != nil {
+				fmt.Printf("Signing error: %v\n", err)
+				break
+			}
+
+			if err := nonce.SetRi(); err != nil {
+				fmt.Printf("Signing error: %v\n", err)
+				break
+			}
+
+			nonce.SetCommit(session)
+			ps.SetN(nonce)
+
+			ci, err := nonce.GetCommit()
+			if err != nil {
+				fmt.Printf("Signing error: %v\n", err)
+				break
+			}
+
+			var m1 crypto.MaterialToSend1
+			m1.SetIndex(nonce.GetIndex())
+			m1.SetCommit(ci)
+
+			ps.SetMaterialToSend1(m1)
+
+			Ri, err := nonce.GetRi()
+			if err != nil {
+				fmt.Printf("Signing error: %v\n", err)
+				break
+			}
+
+			var m2 crypto.MaterialToSend2
+			m2.SetIndex(nonce.GetIndex())
+			m2.SetRi(*Ri)
+
+			ps.SetMaterialToSend2(m2)
+			
 			break
 		} else if resp.Status == "waiting" {
 			fmt.Printf("\rWaiting for other participants... (%d/%d)", resp.JoinedCount, resp.Threshold)

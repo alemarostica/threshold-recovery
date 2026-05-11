@@ -7,7 +7,12 @@ import (
 	"errors"
 )
 
-// commitNonce calcola H(sess.ID || sess.IndexHash || index || Ri).
+// commitNonce computes the first-round nonce commitment.
+//
+// In the signing protocol, signer_i first sends a commitment to its public
+// nonce R_i and reveals R_i only in the next round. The session data and signer
+// index are included to bind the commitment to this signing execution.
+// commitNonce computes c_i = H(sessionID || indexHash || i || R_i).
 func commitNonce(sess *Session, index ParticipantID, Ri Point) []byte {
 	h := sha256.New()
 	h.Write(sess.id)
@@ -21,6 +26,10 @@ func commitNonce(sess *Session, index ParticipantID, Ri Point) []byte {
 	return h.Sum(nil)
 }
 
+// VerifyNonceAux checks that a revealed R_i matches the first-round commitment.
+//
+// This prevents a signer from choosing or changing its nonce after seeing the
+// nonces revealed by the other active signers.
 func VerifyNonceAux(sess *Session, index ParticipantID, commit []byte, Ri Point) (bool, error) {
 	if sess == nil {
 		return false, errors.New("VerifyNonceAux failed: sess is nil")

@@ -171,6 +171,49 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		activeSignings[walletHex] = &ss
 		delete(pendingSignings, walletHex)
 
+		var nonce crypto.NonceShare
+		if err := nonce.SetIndex(crypto.ServerID); err != nil {
+			http.Error(w, "Signing error: index", http.StatusInternalServerError)
+			return
+		}
+
+		if err := nonce.Setri(); err != nil {
+			http.Error(w, "Signing error: ri", http.StatusInternalServerError)
+			return
+		}
+
+		if err := nonce.SetRi(); err != nil {
+			http.Error(w, "Signing error: Ri", http.StatusInternalServerError)
+			return
+		}
+
+		nonce.SetCommit(session)
+		ss.SetNonce(nonce)
+
+		ci, err := nonce.GetCommit()
+		if err != nil {
+			http.Error(w, "Signing error: m1", http.StatusInternalServerError)
+			return
+		}
+		
+		var m1 crypto.MaterialToSend1
+		m1.SetIndex(nonce.GetIndex())
+		m1.SetCommit(ci)
+
+		ss.SetMaterialToSend1(m1)
+
+		Ri, err := nonce.GetRi()
+		if err != nil {
+			http.Error(w, "Signing error, m2", http.StatusInternalServerError)
+			return
+		}
+
+		var m2 crypto.MaterialToSend2
+		m2.SetIndex(nonce.GetIndex())
+		m2.SetRi(*Ri)
+
+		ss.SetMaterialToSend2(m2)
+
 		h.Audit.Log(walletHex, core.EventSignAttempt, "Recovery threshold reached, session started.")
 		json.NewEncoder(w).Encode(SignInitResponse{
 			Status:      "ready",

@@ -9,6 +9,12 @@ import (
 	"filippo.io/edwards25519"
 )
 
+// This file contains helper functions for signer-set normalization,
+// Schnorr challenge computation, and final signature verification.
+
+// NormalizeParticipantIDs sorts and validates a friend signer set.
+//
+// ServerID is not included here: this function only handles friend indices.
 func NormalizeParticipantIDs(indices []ParticipantID, n int) ([]ParticipantID, error) {
 	if len(indices) == 0 {
 		return nil, errors.New("empty index set")
@@ -33,6 +39,17 @@ func NormalizeParticipantIDs(indices []ParticipantID, n int) ([]ParticipantID, e
 	return cp, nil
 }
 
+// Challenge computes the Schnorr challenge.
+//
+// The challenge is bound to:
+//   - the aggregated nonce R,
+//   - the public key P,
+//   - the message,
+//   - the session identifier,
+//   - the active signer set hash.
+//
+// This prevents replaying partial signatures across different sessions or
+// signer sets.
 func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 
 	if sess == nil {
@@ -45,7 +62,7 @@ func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 		return Scalar{}, errors.New("Challenge failed: empty message")
 	}
 
-	// (opzionale ma consigliato)
+	// Reject invalid public points.
 	if R.Equal(edwards25519.NewIdentityPoint()) == 1 {
 		return Scalar{}, errors.New("Challenge failed: invalid R (identity)")
 	}
@@ -53,6 +70,8 @@ func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 		return Scalar{}, errors.New("Challenge failed: invalid public key")
 	}
 
+	// e = H(R || P || msg || sessionID || indexHash).
+	// Need of sha512 for a suitable output length
 	h := sha512.New()
 
 	h.Write(R.Bytes())
@@ -68,7 +87,6 @@ func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 		return Scalar{}, err
 	}
 
-	// hardening opzionale: evita e = 0
 	var zero Scalar
 	if e.Equal(&zero) == 1 {
 		return Scalar{}, errors.New("Challenge failed: challenge is zero")
@@ -77,7 +95,13 @@ func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 	return e, nil
 }
 
-// se la vogliamo lasciare come funzione è ok
+// VerifySignature verifies the final aggregated Schnorr signature.
+//
+// The signature is accepted iff:
+//
+//	Z*G = R + e*P,
+//
+// where e is recomputed from the same session-bound challenge.
 func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, error) {
 
 	fmt.Printf("verify R: %x\n", sig.R.Bytes())
@@ -94,13 +118,13 @@ func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, er
 		return false, errors.New("VerifySignature failed: message has length zero")
 	}
 
-	// Recompute challenge
+	// Recompute the session-bound Schnorr challenge.
 	e, err := Challenge(&sess, &sig.R, &P, msg)
 	if err != nil {
 		return false, fmt.Errorf("VerifySignature failed: %w", err)
 	}
 
-	// LHS: z * G
+	// Left-hand side: Z*G.
 	var zero Scalar
 	if sig.Z.Equal(&zero) == 1 {
 		return false, errors.New("VerifySignature failed: signature is zero")
@@ -109,7 +133,7 @@ func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, er
 	var zG Point
 	zG.ScalarBaseMult(&sig.Z)
 
-	// RHS: R + eP
+	// Right-hand side: R + e*P.
 	var eP Point
 	eP.ScalarMult(&e, &P)
 
@@ -122,57 +146,3 @@ func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, er
 	// Final check
 	return zG.Equal(&rhs) == 1, nil
 }
-
-// se la vogliammo scrivere come metodo (per ora su ParticipantSigner)
-// nel caso: fare anche il setter se vogliamo aggiungere l'output alle struct
-/*
-func (ps *ParticipantSigner) VerifySignature(msg []byte) bool {
-	// 1. controlli base
-	if len(msg) == 0 {
-		return false
-	}
-
-	if ps.finalSig.R == nil || ps.finalSig.Z == nil {
-		return false
-	}
-
-	// 2. ricostruzione punti/scalari
-	var Rpoint Point
-	if _, err := Rpoint.SetBytes(ps.finalSig.R); err != nil {
-		return false
-	}
-
-	var z Scalar
-	if _, err := z.SetCanonicalBytes(ps.finalSig.Z); err != nil {
-		return false
-	}
-
-	// 3. recupero public key dalla session
-	Pbytes := ps.session.GetP()
-
-	var Ppoint Point
-	if _, err := Ppoint.SetBytes(Pbytes); err != nil {
-		return false
-	}
-
-	// 4. ricostruzione challenge
-	e, err := Challenge(ps.session, Rpoint, Ppoint, msg)
-	if err != nil {
-		return false
-	}
-
-	// 5. verifica equazione: zG ?= R + eP
-	var zG Point
-	zG.ScalarBaseMult(&z)
-
-	var eP Point
-	eP.ScalarMult(&e, &Ppoint)
-
-	var rhs Point
-	rhs.Add(&Rpoint, &eP)
-
-	// 6. confronto finale
-	return zG.Equal(&rhs) == 1
-}
-
-*/

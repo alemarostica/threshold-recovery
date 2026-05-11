@@ -1,27 +1,47 @@
 package crypto
 
 import (
-	"slices"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 
 	"filippo.io/edwards25519"
 )
 
+// This file implements the threshold Schnorr signing phase.
+//
+// The LSSS share-generation phase gives each signer a share s_i = v · M_i.
+// During signing, each active signer computes a reconstruction coefficient
+// lambda_i for the selected signer set and produces a partial Schnorr signature:
+//
+//     z_i = r_i + e * lambda_i * s_i.
+//
+// The final signature is obtained by aggregating all partial values z_i.
+
 // Session
+// Session binds one signing execution to a signer set.
+//
+// The session identifier prevents replay across different signing attempts,
+// while indexHash binds the challenge to the exact set of active signers.
+
 type Session struct {
 	id        []byte
 	indices   []ParticipantID
 	indexHash []byte
 }
 
+// HasParticipant checks whether a friend belongs to the active signer set.
+// Auxiliary function for the following one
 func (s *Session) HasParticipant(id ParticipantID) bool {
 	return slices.Contains(s.indices, id)
 }
 
+// HasSigner checks whether id is an active signer.
+//
+// The server is mandatory in the access policy and is represented by ServerID.
 func (s *Session) HasSigner(id ParticipantID) bool {
 	if id == ServerID {
 		return true
@@ -29,17 +49,18 @@ func (s *Session) HasSigner(id ParticipantID) bool {
 	return s.HasParticipant(id)
 }
 
-// Spero questa cosa vada bene in go lmao
+// SetID samples a fresh identifier for this signing session.
+// Does it work?
 func (s *Session) SetID(id []byte) error {
 	sid := make([]byte, 32)
+
 	if id == nil {
 		if _, err := rand.Read(sid); err != nil {
 			return err
-		}	
+		}
 	} else {
 		sid = id
 	}
-	
 	s.id = sid
 	return nil
 }
@@ -48,6 +69,7 @@ func (s *Session) GetID() []byte {
 	return s.id
 }
 
+// SetIndices stores the friend indices participating in this session.
 func (s *Session) SetIndices(indices []ParticipantID) {
 	s.indices = indices
 }
@@ -58,6 +80,10 @@ func (s *Session) GetIndices() []ParticipantID {
 	return out
 }
 
+// SetIndexHash hashes the ordered signer indices.
+//
+// This value is included in the Schnorr challenge to bind the signature to the
+// selected reconstruction set.
 func (s *Session) SetIndexHash(ids []ParticipantID) {
 	h := sha256.New()
 	tmp := make([]byte, 4)
@@ -77,6 +103,9 @@ func (s *Session) GetNumParticipants() int {
 	return len(s.indices)
 }
 
+// PartialSignature is the Schnorr partial signature produced by one signer.
+//
+// Z stores z_i = r_i + e * lambda_i * s_i.
 type PartialSignature struct {
 	Index    ParticipantID
 	setIndex bool
@@ -102,12 +131,20 @@ func (ps *PartialSignature) GetZ() Scalar {
 	return ps.Z
 }
 
+// Signature is the final aggregated Schnorr signature.
+//
+// It satisfies:
+//
+//	Z*G = R + e*P.
 type Signature struct {
 	R Point
 	Z Scalar
 }
 
-// Nonce
+// NonceShare stores the nonce material of one signer.
+//
+// Each signer samples r_i, publishes R_i = r_i*G, and first commits to R_i
+// before revealing it.
 type NonceShare struct {
 	index  ParticipantID
 	ri     Scalar
@@ -129,6 +166,7 @@ func (n *NonceShare) GetIndex() ParticipantID {
 	return n.index
 }
 
+// Setri samples the private nonce r_i.
 func (n *NonceShare) Setri() error {
 	err := GenerateRandomScalar(&n.ri)
 	if err != nil {
@@ -142,6 +180,7 @@ func (n *NonceShare) Getri() Scalar {
 	return n.ri
 }
 
+// SetRi computes the public nonce R_i = r_i*G.
 func (n *NonceShare) SetRi() error {
 	if !n.set_ri {
 		return errors.New("n.SetRi failed: ri is not set")
@@ -162,6 +201,9 @@ func (n *NonceShare) GetRi() (*Point, error) {
 	return &n.Ri, nil
 }
 
+// SetCommit computes the commitment c_i = H(session, i, R_i).
+//
+// This is the first round of the commit-and-reveal nonce exchange.
 func (n *NonceShare) SetCommit(sess *Session) {
 	n.ci = commitNonce(sess, n.index, n.Ri)
 }
@@ -173,7 +215,9 @@ func (n *NonceShare) GetCommit() ([]byte, error) {
 	return n.ci, nil
 }
 
-// Material to send to others at first
+// MaterialToSend1 is the first-round message.
+//
+// It contains only the nonce commitment c_i and the index i.
 type MaterialToSend1 struct {
 	Index    ParticipantID
 	setIndex bool
@@ -199,6 +243,9 @@ func (m *MaterialToSend1) GetCommit() []byte {
 	return m.ci
 }
 
+// MaterialToSend2 is the second-round message.
+//
+// It reveals the public nonce R_i previously committed to in MaterialToSend1.
 type MaterialToSend2 struct {
 	Index    ParticipantID
 	setIndex bool
@@ -224,22 +271,33 @@ func (m *MaterialToSend2) GetRi() Point {
 	return m.Ri
 }
 
-// Participant
+// ParticipantSigner handles the signing state of a friend.
+//
+// The participant uses its LSSS share s_i and reconstruction coefficient
+// lambda_i to produce a partial Schnorr signature.
 type ParticipantSigner struct {
-	p                   Participant
-	P                   Point
-	indices             []ParticipantID
+	p                   Participant     // Friend holding share s_i.
+	P                   Point           // Dealer public key P = sG.
+	indices             []ParticipantID // Active friend indices.
 	indicesSet          bool
-	lagrangeCoefficient Scalar
-	R                   Point
+	lagrangeCoefficient Scalar // Reconstruction coefficient lambda_i.
+	R                   Point  // Aggregated nonce R = sum R_i.
 	n                   NonceShare
 	sess                Session
-	materialToSend1     MaterialToSend1  // material to send to others at first
-	materialToSend2     MaterialToSend2  // material to send to others at second
-	partialSig          PartialSignature // material to send to others at third
+	materialToSend1     MaterialToSend1  // Round 1: nonce commitment c_i.
+	materialToSend2     MaterialToSend2  // Round 2: nonce opening R_i.
+	partialSig          PartialSignature // Round 3: partial signature z_i.
 	finalSig            Signature
 }
 
+// SetLagrangeCoefficient computes lambda_i for a friend signer.
+//
+// The coefficient reconstructs the secret from the active LSSS shares without
+// explicitly reconstructing s. It is the coefficient used in:
+//
+//	z_i = r_i + e * lambda_i * s_i.
+//
+// The formula is the one derived in the report.
 func (ps *ParticipantSigner) SetLagrangeCoefficient() error {
 	if !ps.indicesSet {
 		return errors.New("ps.SetLagrangeCoefficient failed: indices not set")
@@ -261,10 +319,12 @@ func (ps *ParticipantSigner) SetLagrangeCoefficient() error {
 	aus.Set(&One)                                                  // aus = one
 	aus.Subtract(&aus, &alpha)                                     // aus = 1-alpha
 	aus.Invert(&aus)                                               // aus = 1/(1-alpha)
-	ps.lagrangeCoefficient.Multiply(&ps.lagrangeCoefficient, &aus) // coeff = alpha / (1 - alpha)
+	ps.lagrangeCoefficient.Multiply(&ps.lagrangeCoefficient, &aus) // coeff = 1 / (1 - alpha)
 
 	var term Scalar
-	term.Set(&One) // term = one
+	term.Set(&One)
+	// Product over the other active friends:
+	//     alpha^{j-1} / (alpha^{j-1} - alpha^{i-1}).
 	for _, id := range ps.indices {
 		if id == ps.p.id {
 			continue
@@ -281,6 +341,7 @@ func (ps *ParticipantSigner) SetLagrangeCoefficient() error {
 			term.Multiply(&term, &aus2)
 		}
 	}
+	// Final friend reconstruction coefficient lambda_i.
 	ps.lagrangeCoefficient.Multiply(&ps.lagrangeCoefficient, &term) // coeff = alpha / (1 - alpha) * product_{j!=i} (alpha^{id-1} / (alpha^{id-1} - alpha^{p.id-1}))
 	return nil
 }
@@ -355,6 +416,10 @@ func (ps *ParticipantSigner) GetMaterialToSend2() MaterialToSend2 {
 	return ps.materialToSend2
 }
 
+// VerifyNonce checks the commit-and-reveal consistency of another signer's nonce.
+//
+// It verifies that the revealed R_i matches the first-round commitment c_i for
+// the same session and signer index.
 func (ps *ParticipantSigner) VerifyNonce(mat1 *MaterialToSend1, mat2 *MaterialToSend2) (bool, error) { // Verify the material received from another participant
 	if !mat1.setIndex {
 		return false, errors.New("ps.VerifyNonce failed: material index is not set")
@@ -379,6 +444,10 @@ func (ps *ParticipantSigner) VerifyNonce(mat1 *MaterialToSend1, mat2 *MaterialTo
 	return boolean, nil
 }
 
+// SetR aggregates the public nonces of all active signers:
+// In the input must appear also mat2 of ps
+//
+//	R = sum_i R_i.
 func (ps *ParticipantSigner) SetR(mat2 []MaterialToSend2) error {
 	ps.R = *edwards25519.NewIdentityPoint()
 	for _, riBytes := range mat2 {
@@ -394,6 +463,14 @@ func (ps *ParticipantSigner) GetR() Point {
 	return ps.R
 }
 
+// SetPartialSignature computes the participant partial Schnorr signature.
+// It first computes the challenge
+//
+//	e = H(R || P || msg || session),
+//
+// then computes:
+//
+//	z_i = r_i + e * lambda_i * s_i.
 func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 
 	var zero Scalar
@@ -415,7 +492,7 @@ func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 		return errors.New("ps.SetPartialSignature failed: missing ri")
 	}
 
-	// Compute the challenge
+	// Compute the Schnorr challenge e.
 	e, err := Challenge(&ps.sess, &ps.R, &ps.P, msg)
 	if err != nil {
 		return err
@@ -426,12 +503,12 @@ func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 	fmt.Printf("sign sess.id: %x\n", ps.sess.GetID())
 	fmt.Printf("sign sess.indexHash: %x\n", ps.sess.GetIndexHash())
 
-	// compute term = e*lambda*share
+	// term = e * lambda_i * s_i.
 	var term Scalar
 	term.Multiply(&lambda, &share)
 	term.Multiply(&term, &e)
 
-	// compute z = ri + term
+	// z_i = r_i + term.
 	var z Scalar
 	z.Add(&ri, &term)
 
@@ -449,16 +526,25 @@ func (ps *ParticipantSigner) GetPartialSignature() PartialSignature {
 	return ps.partialSig
 }
 
+// CombineSignature aggregates the partial signatures.
+//
+// Given z_i values from all active signers, it computes:
+//
+//	Z = sum_i {z_i}.
+//
+// The resulting signature is (R, Z).
 func (ps *ParticipantSigner) CombineSignature(parSig []PartialSignature) error {
 	if len(parSig) != len(ps.indices) {
 		return errors.New("ps.CombineSignature failed: invalid number of partial signatures")
 	}
 
-	// Reject identity point
+	// Reject the identity Point, which would make the Schnorr signature invalid.
 	if ps.R.Equal(edwards25519.NewIdentityPoint()) == 1 {
 		return errors.New("ps.CombineSignature failed: invalid R (identity point)")
 	}
 
+	// Track the expected signer indices to reject missing, duplicate, or unexpected
+	// partial signatures.
 	expected := make(map[ParticipantID]bool)
 	for _, id := range ps.indices {
 		expected[id] = false
@@ -470,7 +556,7 @@ func (ps *ParticipantSigner) CombineSignature(parSig []PartialSignature) error {
 	}
 	expected[ownID] = true
 
-	// Aggregate all partial z values
+	// Aggregate all partial z_i values.
 	z := ps.partialSig.Z
 
 	for _, el := range parSig {
@@ -513,7 +599,11 @@ func (ps *ParticipantSigner) GetSignature() Signature {
 	return ps.finalSig
 }
 
-// Server
+// ServerSigner handles the signing state of the mandatory server.
+//
+// The server uses its share s_0 and coefficient lambda_0 to produce its partial
+// Schnorr signature.
+
 type ServerSigner struct {
 	s                   Server
 	P                   Point
@@ -523,9 +613,9 @@ type ServerSigner struct {
 	indices             []ParticipantID
 	indicesSet          bool
 	sess                Session
-	materialToSend1     MaterialToSend1  // material to send to others at first
-	materialToSend2     MaterialToSend2  // material to send to others at second
-	partialSig          PartialSignature // material to send to others at third
+	materialToSend1     MaterialToSend1  // Round 1: nonce commitment c_i.
+	materialToSend2     MaterialToSend2  // Round 2: nonce opening R_i.
+	partialSig          PartialSignature // Round 3: partial signature z_i.
 	finalSig            Signature
 }
 
@@ -545,12 +635,17 @@ func (ss *ServerSigner) GetP() Point {
 	return ss.P
 }
 
+// SetLagrangeCoefficient computes the server reconstruction coefficient.
+//
+// For the server share s_0, the report-derived coefficient is:
+//
+//	lambda_0 = alpha / (alpha - 1).
 func (ss *ServerSigner) SetLagrangeCoefficient() error {
 	if !ss.indicesSet {
 		return errors.New("ps.SetLagrangeCoefficient failed: indices not set")
 	}
 	var aus Scalar
-	ss.lagrangeCoefficient.Set(&alpha)                             // coeff = alpha
+	ss.lagrangeCoefficient.Set(&alpha)                             // numerator = alpha
 	aus.Set(&alpha)                                                // aus = alpha
 	aus.Subtract(&aus, &One)                                       // aus = alpha - 1
 	aus.Invert(&aus)                                               // aus = 1/(alpha - 1)
@@ -607,14 +702,34 @@ func (ss *ServerSigner) GetMaterialToSend2() MaterialToSend2 {
 	return ss.materialToSend2
 }
 
-func (ss *ServerSigner) VerifyNonce(mat *MaterialToSend1, Ri Point) (bool, error) { // Verify the material received from another participant
-	boolean, err := VerifyNonceAux(&ss.sess, mat.Index, mat.ci, Ri)
+// VerifyNonce checks that a revealed nonce R_i matches its prior commitment.
+func (ss *ServerSigner) VerifyNonce(mat1 *MaterialToSend1, mat2 *MaterialToSend2) (bool, error) { // Verify the material received from another participant
+	if !mat1.setIndex {
+		return false, errors.New("ps.VerifyNonce failed: material index is not set")
+	}
+	if !mat1.setci {
+		return false, errors.New("ps.VerifyNonce failed: material commit is not set")
+	}
+	if !mat2.setIndex {
+		return false, errors.New("ps.VerifyNonce failed: material index is not set")
+	}
+	if !mat2.setRi {
+		return false, errors.New("ps.VerifyNonce failed: material Ri is not set")
+	}
+	if mat1.GetIndex() != mat2.GetIndex() {
+		return false, errors.New("ps.VerifyNonce failed: material indices do not match")
+	}
+
+	boolean, err := VerifyNonceAux(&ss.sess, mat1.Index, mat1.ci, mat2.Ri)
 	if err != nil {
-		return false, fmt.Errorf("ss.VerifyNonce failed: %w", err)
+		return false, fmt.Errorf("ps.VerifyNonce failed: %w", err)
 	}
 	return boolean, nil
 }
 
+// SetR aggregates all public nonces:
+//
+//	R = sum_i {R_i}.
 func (ss *ServerSigner) SetR(mat2 []MaterialToSend2) error {
 	ss.R = *edwards25519.NewIdentityPoint()
 	for _, riBytes := range mat2 {
@@ -630,6 +745,9 @@ func (ss *ServerSigner) GetR() Point {
 	return ss.R
 }
 
+// SetPartialSignature computes the server partial Schnorr signature:
+//
+//	z_0 = r_0 + e * lambda_0 * s_0.
 func (ss *ServerSigner) SetPartialSignature(msg []byte) error {
 
 	var zero Scalar
@@ -651,18 +769,18 @@ func (ss *ServerSigner) SetPartialSignature(msg []byte) error {
 		return errors.New("ss.SetPartialSignature failed: missing ri")
 	}
 
-	// Compute the challenge
+	// Compute the Schnorr challenge e.
 	e, err := Challenge(&ss.sess, &ss.R, &ss.P, msg)
 	if err != nil {
 		return fmt.Errorf("Challenge failed: %w", err)
 	}
 
-	// compute term = e*lambda*share
+	// term = e * lambda_0 * s_0.
 	var term Scalar
 	term.Multiply(&lambda, &share)
 	term.Multiply(&term, &e)
 
-	// compute z = ri + term
+	// z_0 = r_0 + term.
 	var z Scalar
 	z.Add(&ri, &term)
 
@@ -680,6 +798,11 @@ func (ss *ServerSigner) GetPartialSignature() PartialSignature {
 	return ss.partialSig
 }
 
+// CombineSignature aggregates the server and participant partial signatures.
+//
+// The output is the final Schnorr signature (R, Z), where:
+//
+//	Z = z_0 + sum_i {z_i}.
 func (ss *ServerSigner) CombineSignature(parSig []PartialSignature) error {
 	if !ss.indicesSet {
 		return errors.New("ss.CombineSignature failed: indices not set")
