@@ -5,15 +5,25 @@ import (
 	"threshold-recovery/internal/crypto"
 )
 
-// --- CRYPTO INTERFACES ---
+// This file defines the interfaces required by an Authenticated Key Exchange (AKE) protocol.
+// The protocol provides mutual authentication between participants and establishes a
+// secure channel used to protect all subsequent communications.
 
+// CRYPTO INTERFACES
+
+// CryptoProvider defines cryptographic primitives required by the AKE protocol,
+// // including Diffie–Hellman, signatures, key derivation, and AEAD encryption.
 type CryptoProvider interface {
+
+	// GenerateEphemeralDH generates an ephemeral Diffie-Hellman keypair for a session.
 	GenerateEphemeralDH() (priv, pub []byte, err error)
+	// ComputeSharedSecret derives the Diffie-Hellman shared secret.
 	ComputeSharedSecret(priv, peerPub []byte) ([]byte, error)
 
 	Sign(privSigKey []byte, msg []byte) ([]byte, error)
 	Verify(pubSigKey []byte, msg []byte, sig []byte) bool
 
+	// DeriveKey applies a KDF over the shared secret and transcript to obtain the session key.
 	DeriveKey(sharedSecret, transcript []byte) ([]byte, error)
 
 	Encrypt(key, plaintext, aad []byte) (ciphertext, nonce []byte, err error)
@@ -23,17 +33,22 @@ type CryptoProvider interface {
 	Hash(data []byte) []byte
 }
 
-// --- SERVER INTERFACE ---
+// SERVER INTERFACE
 
+// Directory provides access to participants' public keys and protocol epoch.
 type Directory interface {
 	GetPublicKey(userID string) (ed25519.PublicKey, error)
 	GetEpoch() uint64
 }
 
+// MessageSender abstracts message transmission between participants.
 type MessageSender interface {
 	Send(msg Message) error
 }
 
+// USEFUL STRUCTS
+
+// ShareMessage represents the payload used in the recovery phase of the protocol.
 type ShareMessage struct {
 	Index       int                    `json:"index"`
 	Share       []byte                 `json:"scalar"`

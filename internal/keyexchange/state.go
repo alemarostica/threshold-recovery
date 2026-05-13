@@ -1,19 +1,22 @@
 package keyexchange
 
+// SessionState stores the local state of one authenticated key exchange session.
 type SessionState struct {
+
+	// Participant identities.
 	MyID   string
 	PeerID string
 
-	// DH
+	// Ephemeral Diffie–Hellman key material.
 	MyPriv  []byte
 	MyPub   []byte
 	PeerPub []byte
 
-	// Nonces
+	// Session nonces exchanged during the protocol.
 	NonceA []byte
 	NonceB []byte
 
-	// Derived
+	// Values derived during session establishment.
 	SharedKey  []byte
 	Transcript []byte
 }
