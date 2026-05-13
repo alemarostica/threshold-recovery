@@ -40,13 +40,6 @@ type RegisterResponse struct {
 	Signature []byte `json:"signature"`
 }
 
-/*
-type SharePickupResponse struct {
-	ShareBlob []byte              `json:"share_blob"`
-	Comms     []crypto.Commitment `json:"commitments"`
-}
-*/
-
 // Liveness request is the JSON body for POST /liveness
 type LivenessRequest struct {
 	Username  string `json:"username"`
@@ -101,6 +94,7 @@ type SignInitResponse struct {
 	JoinedCount int                    `json:"joined_count,omitempty"`
 	Threshold   int                    `json:"threshold,omitempty"`
 	P           []byte                 `json:"point"`
+	Usernames   []string               `json:"usernames"`
 }
 
 type SignCommitment struct {
@@ -116,4 +110,55 @@ type SignReveal struct {
 type PartialSigMessage struct {
 	ParticipantID crypto.ParticipantID `json:"id"`
 	Z             []byte               `json:"z"`
+}
+
+type SetM1Request struct {
+	SessionID []byte               `json:"session_id"`
+	Ci        []byte               `json:"ci"`
+	Index     crypto.ParticipantID `json:"index"`
+}
+
+type SetM2Request struct {
+	SessionID []byte               `json:"session_id"`
+	Ri        []byte               `json:"ci"`
+	Index     crypto.ParticipantID `json:"index"`
+}
+
+type M1_dto struct {
+	Ci    []byte               `json:"ci"`
+	Index crypto.ParticipantID `json:"index"`
+}
+
+type M2_dto struct {
+	Ri    []byte               `json:"ci"`
+	Index crypto.ParticipantID `json:"index"`
+}
+
+type GetM1Request struct {
+	SessionID []byte `json:"session_id"`
+}
+
+type GetM1Response struct {
+	M1Array []M1_dto `json:"m1_array"`
+}
+
+type GetM2Request struct {
+	SessionID []byte `json:"session_id"`
+}
+
+type GetM2Response struct {
+	M2Array []M2_dto `json:"m2_array"`
+}
+
+type SendPartialSign struct {
+	SessionID        []byte                  `json:"session_id"`
+	PartialSignature crypto.PartialSignature `json:"partial_signature"`
+}
+
+type GetPartialSigns struct {
+	SessionID []byte `json:"session_id"`
+}
+
+type GetPartialSignsResp struct {
+	PartialSignatures []crypto.PartialSignature `json:"partial_signatures"`
 }

@@ -1,4 +1,4 @@
-package crypto
+package keyexchange
 
 import (
 	"crypto/ecdh"    // BINGO! Addio crypto/elliptic

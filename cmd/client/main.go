@@ -34,6 +34,12 @@ var activeSessions = make(map[string]*keyexchange.SessionState)
 // Salva temporaneamente le share in attesa che l'handshake finisca
 var pendingMessages = make(map[string][]byte)
 
+// Sessioni del nonce exchange
+var activeNonceSessions = make(map[string]*keyexchange.SessionState)
+
+// Messaggi pending dei nonce
+var pendingNonces = make(map[string][]byte)
+
 // Configuration
 const (
 	ServerURL = "https://localhost:8443"
@@ -67,7 +73,48 @@ type Identity struct {
 	Nonce        []byte             `json:"nonce"`
 }
 
-type ClientSender struct{}
+type ShareSender struct{}
+
+func (cs *ShareSender) Send(msg keyexchange.Message) error {
+	err := callAPI("POST", "/shares/send", msg, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send relay message: %v", err)
+	}
+	return nil
+}
+
+type NonceSender struct{}
+
+func (ns *NonceSender) Send(msg keyexchange.Message) error {
+	err := callAPI("POST", "/nonces/send", msg, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send nonce message: %v", err)
+	}
+	return nil
+}
+
+type ClientDirectory struct {
+	DirectoryEpoch uint64            `json:"directory_epoch"`
+	MyIdentity     *Identity         `json:"identity"`
+	Contacts       map[string]string `json:"contacts"`
+}
+
+func (cd *ClientDirectory) GetPublicKey(userID string) (ed25519.PublicKey, error) {
+	if userID == cd.MyIdentity.Name {
+		return cd.MyIdentity.PublicKey, nil
+	}
+
+	hexKey, exists := cd.Contacts[userID]
+	if !exists {
+		return nil, fmt.Errorf("user %s not found in local contacts", userID)
+	}
+
+	return hex.DecodeString(hexKey)
+}
+
+func (cd *ClientDirectory) GetEpoch() uint64 {
+	return cd.DirectoryEpoch
+}
 
 // Main
 func main() {
@@ -84,7 +131,13 @@ func main() {
 		}
 	}
 
-	startMessagePoller(db)
+	dir := &ClientDirectory{
+		MyIdentity:     db.MyIdentity,
+		DirectoryEpoch: db.DirectoryEpoch,
+		Contacts:       db.Contacts,
+	}
+
+	startMessagePoller(db, dir)
 	if !(db.MyIdentity == nil) && !(len(db.MyWallets) == 0) {
 		pingAllWallets(db)
 	}
@@ -104,7 +157,7 @@ func main() {
 		case "3":
 			createWallet(reader, db)
 		case "4":
-			initializePartialSign(db)
+			initializePartialSign(db, dir)
 		case "5":
 			listCreatedWallets(db)
 		case "0":
@@ -174,22 +227,22 @@ func callAPI(method, path string, payload any, out any) error {
 	return nil
 }
 
-func startMessagePoller(db *LocalDB) {
+func startMessagePoller(db *LocalDB, dir *ClientDirectory) {
 	ticker := time.NewTicker(3 * time.Second) // Frequenza di polling
 	go func() {
 		for range ticker.C {
-			pollRelay(db)
+			pollRelay(db, dir)
 		}
 	}()
 }
 
-func pollRelay(db *LocalDB) {
-	if db.MyIdentity == nil {
+func pollRelay(db *LocalDB, dir *ClientDirectory) {
+	if dir.MyIdentity == nil {
 		return // skippa se non registrato
 	}
 
 	var msgs []keyexchange.Message
-	err := callAPI("GET", "/relay/messages?user_id="+db.MyIdentity.Name, nil, &msgs)
+	err := callAPI("GET", "/shares/messages?user_id="+dir.MyIdentity.Name, nil, &msgs)
 	if err != nil {
 		fmt.Printf("Failed to fetch messages from relay: %v\n", err)
 		return
@@ -198,17 +251,16 @@ func pollRelay(db *LocalDB) {
 		return // no messages
 	}
 
-	provider := crypto.NewDefaultProvider()
-	dir := &ClientDirectory{DB: db}
-	sender := &ClientSender{}
-	myPriv := db.MyIdentity.PrivateKey
+	provider := keyexchange.NewDefaultProvider()
+	sender := &ShareSender{}
+	myPriv := dir.MyIdentity.PrivateKey
 
 	for _, msg := range msgs {
 		fmt.Printf("\n[RELAY] Received message %s from %s\n", msg.Type, msg.From)
 
 		switch msg.Type {
 		case keyexchange.M1:
-			state, err := keyexchange.HandleM1(msg, db.MyIdentity.Name, provider, dir, sender, myPriv)
+			state, err := keyexchange.HandleM1(msg, dir.MyIdentity.Name, provider, dir, sender, myPriv)
 			if err != nil {
 				fmt.Printf("[RELAY] Error: failed to handle M1 message from %s: %v\n", msg.From, err)
 				continue
@@ -246,7 +298,7 @@ func pollRelay(db *LocalDB) {
 			// We are shareholder, dealer sent us encrypted share with M3
 			state, ok := activeSessions[msg.From]
 			if !ok {
-				fmt.Printf("Non active session found for M3 from %s\n", msg.From)
+				fmt.Printf("No active session found for M3 from %s\n", msg.From)
 				continue
 			}
 
@@ -346,7 +398,7 @@ func pingAllWallets(db *LocalDB) {
 	}
 }
 
-func initializePartialSign(db *LocalDB) {
+func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 	if len(db.ReceivedShares) == 0 {
 		fmt.Println("No shares found in local database.")
 		return
@@ -403,7 +455,7 @@ func initializePartialSign(db *LocalDB) {
 			ps.SetParticipant(&part)
 			ps.SetIndices(resp.VectorV)
 			ps.SetLagrangeCoefficient()
-			point,_  := new(crypto.Point).SetBytes(resp.P)
+			point, _ := new(crypto.Point).SetBytes(resp.P)
 			ps.SetP(*point)
 			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
 
@@ -443,6 +495,17 @@ func initializePartialSign(db *LocalDB) {
 
 			ps.SetMaterialToSend1(m1)
 
+			setM1Req := &api.SetM1Request{
+				SessionID: session.GetID(),
+				Ci:        m1.GetCommit(),
+				Index:     m1.GetIndex(),
+			}
+
+			if err := callAPI("POST", "/sign/setm1", setM1Req, nil); err != nil {
+				fmt.Printf("Could not send M1: %v\n", err)
+				return
+			}
+
 			Ri, err := nonce.GetRi()
 			if err != nil {
 				fmt.Printf("Signing error: %v\n", err)
@@ -454,7 +517,122 @@ func initializePartialSign(db *LocalDB) {
 			m2.SetRi(*Ri)
 
 			ps.SetMaterialToSend2(m2)
-			
+
+			getM1Req := &api.GetM1Request{
+				SessionID: session.GetID(),
+			}
+
+			ticker := time.NewTicker(3 * time.Second)
+
+			var allM1resp api.GetM1Response
+			for range ticker.C {
+				if err := callAPI("POST", "/sign/getm1", getM1Req, &allM1resp); err != nil {
+					fmt.Printf("Could not get M1 array: %v\n", err)
+					continue
+				}
+				break
+			}
+
+			var allM1 []crypto.MaterialToSend1
+			for _, m := range allM1resp.M1Array {
+				var m1 crypto.MaterialToSend1
+				m1.SetIndex(m.Index)
+				m1.SetCommit(m.Ci)
+				allM1 = append(allM1, m1)
+			}
+
+			RiPoint := m2.GetRi()
+			setM2Req := &api.SetM2Request{
+				SessionID: session.GetID(),
+				Ri:        RiPoint.Bytes(),
+				Index:     m2.GetIndex(),
+			}
+
+			for err := callAPI("POST", "/sign/setm2", setM2Req, nil); err != nil; {
+				fmt.Printf("Could not send M2: %v\n", err)
+				return
+			}
+
+			var allM2 []crypto.MaterialToSend2
+			for _, m := range allM1resp.M1Array {
+				var m2 crypto.MaterialToSend2
+				m2.SetIndex(m.Index)
+				Ri, _ := new(crypto.Point).SetBytes(m.Ci)
+				m2.SetRi(*Ri)
+				allM2 = append(allM2, m2)
+			}
+
+			getM2Req := &api.GetM2Request{
+				SessionID: session.GetID(),
+			}
+
+			var allM2resp api.GetM2Response
+			for range ticker.C {
+				if err := callAPI("POST", "/sign/getm2", getM2Req, &allM2resp); err != nil {
+					fmt.Printf("Could not get M2 array: %v\n", err)
+					continue
+				}
+				break
+			}
+
+			// trigger verify nonce
+			if len(allM1) != len(allM2) {
+				fmt.Println("Haven't received the same number of M1s and M2s.")
+				continue
+			}
+
+			for i := range len(allM1) {
+				ok, err := ps.VerifyNonce(&allM1[i], &allM2[i])
+				if err != nil {
+					fmt.Printf("Error verifying nonces for participant %d.\n", i)
+					break
+				}
+
+				if !ok {
+					fmt.Printf("Nonces for participant %d did not verify.\n", i)
+					break
+				}
+			}
+
+			if err := ps.SetR(allM2); err != nil {
+				fmt.Println("Could not set R.")
+				break
+			}
+
+			// placeholder message, in a real application this would need to be established
+			msg := []byte("transaction made")
+
+			err = ps.SetPartialSignature(msg)
+			zPart := ps.GetPartialSignature()
+
+			partSignReq := &api.SendPartialSign{
+				SessionID:        session.GetID(),
+				PartialSignature: zPart,
+			}
+
+			if err = callAPI("POST", "/sign/part", partSignReq, nil); err != nil {
+				fmt.Printf("Could not send partial signature: %v\n", err)
+				break
+			}
+
+			getPartSignReq := &api.GetPartialSigns{
+				SessionID: session.GetID(),
+			}
+			var signResp api.GetPartialSignsResp
+
+			for err = callAPI("POST", "/sign/getSign", getPartSignReq, &signResp); err != nil; {
+				fmt.Printf("Trying to fetch partial signatures...")
+				time.Sleep(3 * time.Second)
+			}
+
+			if err := ps.CombineSignature(signResp.PartialSignatures); err != nil {
+				fmt.Printf("Could not combine signatures: %v\n", err)
+				break
+			}
+
+			// WE GOT IT MAYBE
+			fmt.Printf("Final signature: %v", ps.GetSignature())
+
 			break
 		} else if resp.Status == "waiting" {
 			fmt.Printf("\rWaiting for other participants... (%d/%d)", resp.JoinedCount, resp.Threshold)
@@ -464,39 +642,6 @@ func initializePartialSign(db *LocalDB) {
 			return
 		}
 	}
-}
-
-func (cs *ClientSender) Send(msg keyexchange.Message) error {
-	err := callAPI("POST", "/relay/send", msg, nil)
-	if err != nil {
-		return fmt.Errorf("failed to send relay message: %v", err)
-	}
-	return nil
-}
-
-type ClientDirectory struct {
-	DB *LocalDB
-}
-
-func (cd *ClientDirectory) GetUsernames() ([]byte, error) {
-	return nil, nil
-}
-
-func (cd *ClientDirectory) GetPublicKey(userID string) (ed25519.PublicKey, error) {
-	if userID == cd.DB.MyIdentity.Name {
-		return cd.DB.MyIdentity.PublicKey, nil
-	}
-
-	hexKey, exists := cd.DB.Contacts[userID]
-	if !exists {
-		return nil, fmt.Errorf("user %s not found in local contacts", userID)
-	}
-
-	return hex.DecodeString(hexKey)
-}
-
-func (cd *ClientDirectory) GetEpoch() uint64 {
-	return cd.DB.DirectoryEpoch
 }
 
 func createWallet(r *bufio.Reader, db *LocalDB) {
@@ -613,12 +758,16 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
-	provider := crypto.NewDefaultProvider()
-	dir := &ClientDirectory{DB: db}
-	sender := &ClientSender{}
+	provider := keyexchange.NewDefaultProvider()
+	dir := &ClientDirectory{
+		MyIdentity:     db.MyIdentity,
+		DirectoryEpoch: db.DirectoryEpoch,
+		Contacts:       db.Contacts,
+	}
+	sender := &ShareSender{}
 	myPriv := db.MyIdentity.PrivateKey
 
-	fmt.Println("starting key exchange...")
+	fmt.Println("Starting key exchange...")
 
 	for i, cn := range chosenNames {
 		friendName := strings.TrimSpace(cn)
@@ -792,7 +941,7 @@ func printMenu(db *LocalDB) {
 	fmt.Printf(" USER: %s | CONTACTS: %d | CREATED: %d\n",
 		db.MyIdentity.Name, len(db.Contacts), len(db.MyWallets))
 	fmt.Println("==================================================================")
-	fmt.Println(" 1. Show My Identity (for Dealer)    4. Recover Share [DEPR]")
+	fmt.Println(" 1. Show My Identity (for Dealer)    4. Initialize Signing")
 	fmt.Println(" 2. Add a Contact                    5. List My Created Wallets")
 	fmt.Println(" 3. Create New Wallet (Dealer)       0. Exit")
 	fmt.Println("==================================================================")

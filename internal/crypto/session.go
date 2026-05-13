@@ -7,7 +7,7 @@ import (
 	"errors"
 )
 
-func NewSession(indices []ParticipantID, k, n int) (*Session, error) {
+func NewSession(indices []ParticipantID, usernames []string, k, n int) (*Session, error) {
 	cp, err := NormalizeParticipantIDs(indices, n)
 	if err != nil {
 		return nil, err

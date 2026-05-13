@@ -37,8 +37,13 @@ type MessageSender interface {
 type ShareMessage struct {
 	Index       int                    `json:"index"`
 	Share       []byte                 `json:"scalar"`
-	Commitments [][]byte                 `json:"commitments"`
+	Commitments [][]byte               `json:"commitments"`
 	PubParams   crypto.ThresholdParams `json:"public_params"`
 	Username    string                 `json:"username"`
 	WalletPub   ed25519.PublicKey      `json:"wallet_pub_kex"`
+}
+
+type NonceMessage struct {
+	Index    crypto.ParticipantID `json:"participant_id"`
+	Ci       []byte               `json:"ci"`
 }
