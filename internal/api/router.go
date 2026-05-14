@@ -19,31 +19,9 @@ import (
 	"filippo.io/edwards25519"
 )
 
-type PendingSign struct {
-	WalletPubKeyHex string
-	Threshold       int
-	TotalN          int
-	Participants    []crypto.ParticipantID
-	Usernames       []string
-}
-
-type SigningSession struct {
-	Signer            crypto.ServerSigner
-	Materials1        []crypto.MaterialToSend1
-	Materials2        []crypto.MaterialToSend2
-	PartialSignatures []crypto.PartialSignature
-	Message           []byte
-	Sorted            bool
-	Verified          bool
-	Signature         crypto.Signature
-}
-
 var (
 	inbox      = make(map[string][]keyexchange.Message)
 	inboxMutex sync.RWMutex
-
-	noncesInbox = make(map[string][]keyexchange.Message)
-	noncesMutex sync.RWMutex
 
 	// a bit controintuitivo perché il signer ha dentro la sessione e non viceversa
 	// but oh well
@@ -85,6 +63,9 @@ func NewHandler(
 	}
 }
 
+// TODO: bisogna signare tipo tutte le richieste della signature e verificare, damn
+// E aggiornare il logging con la roba signata
+
 // Register the endpoints
 // Every specific endpoint will execute the specific handler
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -103,13 +84,15 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /sign/getSign", h.handleGetSign)
 }
 
-// unneded, remove?
 func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	var req GetPartialSigns
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	found := ""
 	var foundSession *SigningSession
@@ -146,8 +129,10 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 		PartialSignatures: foundSession.PartialSignatures,
 	}
 
-	// aggiungere logica che elimina la sessione quando quando tutti hanno retrievato la signature
-	
+	// TODO: aggiungere logica che elimina la sessione quando quando tutti hanno retrievato la signature
+
+	log := fmt.Sprintf("SIGNATURE: %s tried to retrieve signature\n", "USERNAME_PLACEHOLDER")
+	h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignatureRetrive, log)
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -157,6 +142,9 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	found := ""
 	var foundSession *SigningSession
@@ -184,47 +172,15 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// is it necessary?
-func sortMaterials(session *SigningSession) {
-	slices.SortFunc(session.Materials1, func(a, b crypto.MaterialToSend1) int {
-		return cmp.Compare(a.GetIndex(), b.GetIndex())
-	})
-
-	slices.SortFunc(session.Materials2, func(a, b crypto.MaterialToSend2) int {
-		return cmp.Compare(a.GetIndex(), b.GetIndex())
-	})
-
-	session.Sorted = true
-}
-
-func verifyNonces(session *SigningSession) error {
-	for i := range len(session.Materials1) {
-		if i == 0 {
-			// skip server?
-			continue
-		}
-
-		ok, err := session.Signer.VerifyNonce(&session.Materials1[i], &session.Materials2[i])
-		if err != nil {
-			return err
-		}
-
-		if !ok {
-			return fmt.Errorf("Nonces for participant %d did not verify.\n", i)
-		}
-	}
-
-	session.Verified = true
-
-	return nil
-}
-
 func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 	var req GetM1Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	found := ""
 	var foundSession *SigningSession
@@ -279,6 +235,9 @@ func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	signMu.Lock()
+	defer signMu.Unlock()
+
 	found := ""
 	var foundSession *SigningSession
 	for i, signingSession := range activeSignings {
@@ -332,6 +291,9 @@ func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	signMu.Lock()
+	defer signMu.Unlock()
+
 	found := ""
 	var foundSession *SigningSession
 	for i, signingSession := range activeSignings {
@@ -361,6 +323,9 @@ func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	found := ""
 	var foundSession *SigningSession
@@ -465,7 +430,11 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var serverPart crypto.Server
-		serverPart.SetShare(wallet.ServerShare)
+		share, err := new(crypto.Scalar).SetCanonicalBytes(wallet.ServerShare)
+		if err != nil {
+			http.Error(w, "Could not rebuild server share", http.StatusInternalServerError)
+		}
+		serverPart.SetShare(*share)
 		serverPart.SetParams(&wallet.ThresholdParams)
 
 		var ss crypto.ServerSigner
@@ -488,6 +457,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			Message:           []byte("transaction to sign"),
 			Sorted:            false,
 			Verified:          false,
+			WalletPubKeyHex:   walletHex,
 		}
 
 		activeSignings[walletHex] = signingSession
@@ -653,8 +623,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Map the received DTO to the model
 	wallet := &core.Wallet{
 		PublicKey:           req.PublicKey,
-		ServerShare:         serverShare,
-		Commitments:         rebuiltCommitments,
+		ServerShare:         req.ServerShare,
+		Commitments:         req.Commitments,
 		LastActivity:        time.Now(),
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold

@@ -16,8 +16,7 @@ const (
 	EventSignAttempt       AuditEvent = "SIGN_ATTEMPT"
 	EventSignSuccess       AuditEvent = "SIGN_SUCCESS"
 	EventSignBlocked       AuditEvent = "SIGN_BLOCKED_ACTIVE"
-	EventSharePickup       AuditEvent = "SHARE_PICKUP"
-	EventSharePickupDenied AuditEvent = "SHARE_PICKUP_DENIED"
+	EventSignatureRetrive  AuditEvent = "SIGN_RETRIEVE"
 )
 
 // Every security log is appended to a file

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -23,8 +22,7 @@ import (
 	"time"
 
 	"filippo.io/edwards25519"
-	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/pbkdf2"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 )
 
@@ -68,9 +66,7 @@ type Identity struct {
 	Name         string             `json:"name"`
 	PublicKey    ed25519.PublicKey  `json:"public_key"`
 	PrivateKey   ed25519.PrivateKey `json:"-"`
-	EncryptedKey []byte             `json:"encrypted_key"`
-	Salt         []byte             `json:"salt"`
-	Nonce        []byte             `json:"nonce"`
+	PasswordHash []byte             `json:"password_hash"`
 }
 
 type ShareSender struct{}
@@ -824,39 +820,23 @@ Begin:
 		goto Begin
 	}
 
+	hash, err := bcrypt.GenerateFromPassword(bytePassword, bcrypt.DefaultCost)
+	if err != nil {
+		fmt.Printf("Failed to hash password: %v\n", err)
+		goto Begin
+	}
+
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Printf("Failed to generate identity keys: %v\n", err)
 		goto Begin
 	}
 
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		fmt.Printf("Failed to generate salt: %v\n", err)
-		goto Begin
-	}
-
-	// this is barely useful, there are A LOT of attacks that could be carried out
-	// against this simple password protection,
-	// but at least we don't have the privKey in clear
-	key := pbkdf2.Key(bytePassword, salt, 100000, 32, sha256.New)
-
-	aead, _ := chacha20poly1305.NewX(key)
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		fmt.Printf("Failed to generate nonce: %v\n", err)
-		goto Begin
-	}
-
-	encryptedKey := aead.Seal(nil, nonce, privKey, nil)
-
 	db.MyIdentity = &Identity{
 		Name:         name,
 		PublicKey:    pubKey,
 		PrivateKey:   privKey,
-		EncryptedKey: encryptedKey,
-		Salt:         salt,
-		Nonce:        nonce,
+		PasswordHash: hash,
 	}
 
 	fmt.Print("")
@@ -879,7 +859,7 @@ func loginAndUnlock(db *LocalDB) error {
 	fmt.Printf("Welcome back, %s!\n", db.MyIdentity.Name)
 
 	for range 3 {
-		fmt.Printf("Enter password to unlock local database: ")
+		fmt.Printf("Enter password to login: ")
 		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Println()
 		if err != nil {
@@ -890,18 +870,14 @@ func loginAndUnlock(db *LocalDB) error {
 		start := time.Now()
 		targetDuration := 3 * time.Second
 
-		// Derive a 32 byte key to encrypt stuff
-		key := pbkdf2.Key(passwordBytes, db.MyIdentity.Salt, 100000, 32, sha256.New)
-
-		aead, err := chacha20poly1305.NewX(key)
-		if err != nil {
-			return fmt.Errorf("encryption setup failed: %v", err)
+		err = bcrypt.CompareHashAndPassword(db.MyIdentity.PasswordHash, passwordBytes)
+		
+		if err == nil {
+			fmt.Println("Database unlocked succesfully!")
+			return nil
 		}
 
-		privKey, err := aead.Open(nil, db.MyIdentity.Nonce, db.MyIdentity.EncryptedKey, nil)
-
 		if err == nil {
-			db.MyIdentity.PrivateKey = privKey
 			fmt.Println("Database unlocked succesfully!")
 			return nil
 		}
