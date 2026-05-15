@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -323,10 +325,21 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			}
 
 			var rebuiltCommitments crypto.Commitment
+			commitmentsMalformed := false
 
 			for _, b := range message.Commitments {
-				p, _ := edwards25519.NewIdentityPoint().SetBytes(b)
+				p, err := edwards25519.NewIdentityPoint().SetBytes(b)
+				if err != nil {
+					fmt.Printf("Invalid commitment encoding: %v\n", err)
+					commitmentsMalformed = true
+					break
+				}
 				rebuiltCommitments = append(rebuiltCommitments, *p)
+			}
+
+			if commitmentsMalformed {
+				fmt.Println("Discarding malformed share message.")
+				continue
 			}
 
 			// Verification
@@ -409,7 +422,7 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 	idxStr := readInput(bufio.NewReader(os.Stdin))
 	idx, _ := strconv.Atoi(idxStr)
 
-	if idx < 0 || idx > len(db.ReceivedShares) {
+	if idx < 0 || idx >= len(db.ReceivedShares) {
 		fmt.Println("Invalid selection.")
 		return
 	}
@@ -451,11 +464,15 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 			ps.SetParticipant(&part)
 			ps.SetIndices(resp.VectorV)
 			ps.SetLagrangeCoefficient()
-			point, _ := new(crypto.Point).SetBytes(resp.P)
+			point, err := new(crypto.Point).SetBytes(resp.P)
+			if err != nil {
+				fmt.Printf("Failed to decode public key P: %v\n", err)
+				return
+			}
 			ps.SetP(*point)
 			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
 
-			var session *crypto.Session
+			session := &crypto.Session{}
 			session.SetID(resp.SessionID)
 			session.SetIndices(resp.VectorV)
 			session.SetIndexHash(resp.VectorV)
@@ -519,6 +536,7 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 			}
 
 			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
 
 			var allM1resp api.GetM1Response
 			for range ticker.C {
@@ -537,6 +555,10 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 				allM1 = append(allM1, m1)
 			}
 
+			slices.SortFunc(allM1, func(a, b crypto.MaterialToSend1) int {
+				return cmp.Compare(a.GetIndex(), b.GetIndex())
+			})
+
 			RiPoint := m2.GetRi()
 			setM2Req := &api.SetM2Request{
 				SessionID: session.GetID(),
@@ -547,15 +569,6 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 			for err := callAPI("POST", "/sign/setm2", setM2Req, nil); err != nil; {
 				fmt.Printf("Could not send M2: %v\n", err)
 				return
-			}
-
-			var allM2 []crypto.MaterialToSend2
-			for _, m := range allM1resp.M1Array {
-				var m2 crypto.MaterialToSend2
-				m2.SetIndex(m.Index)
-				Ri, _ := new(crypto.Point).SetBytes(m.Ci)
-				m2.SetRi(*Ri)
-				allM2 = append(allM2, m2)
 			}
 
 			getM2Req := &api.GetM2Request{
@@ -571,22 +584,47 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 				break
 			}
 
+			var allM2 []crypto.MaterialToSend2
+			for _, m := range allM2resp.M2Array {
+				Ri, err := new(crypto.Point).SetBytes(m.Ri)
+				if err != nil {
+					fmt.Printf("Failed to decode Ri for participant %d: %v\n", m.Index, err)
+					return
+				}
+
+				var m2 crypto.MaterialToSend2
+				m2.SetIndex(m.Index)
+				m2.SetRi(*Ri)
+
+				allM2 = append(allM2, m2)
+			}
+
+			slices.SortFunc(allM2, func(a, b crypto.MaterialToSend2) int {
+				return cmp.Compare(a.GetIndex(), b.GetIndex())
+			})
+
 			// trigger verify nonce
 			if len(allM1) != len(allM2) {
 				fmt.Println("Haven't received the same number of M1s and M2s.")
 				continue
 			}
 
-			for i := range len(allM1) {
+			for i := range allM1 {
+				if allM1[i].GetIndex() != allM2[i].GetIndex() {
+					fmt.Printf("Nonce material index mismatch: M1 has %d, M2 has %d\n",
+						allM1[i].GetIndex(), allM2[i].GetIndex())
+					return
+				}
+
 				ok, err := ps.VerifyNonce(&allM1[i], &allM2[i])
 				if err != nil {
-					fmt.Printf("Error verifying nonces for participant %d.\n", i)
-					break
+					fmt.Printf("Error verifying nonce for participant %d: %v\n", allM1[i].GetIndex(), err)
+					return
 				}
 
 				if !ok {
-					fmt.Printf("Nonces for participant %d did not verify.\n", i)
-					break
+					fmt.Printf("Nonce for participant %d did not verify.\n", allM1[i].GetIndex())
+					return
 				}
 			}
 
@@ -596,9 +634,13 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 			}
 
 			// placeholder message, in a real application this would need to be established
-			msg := []byte("transaction made")
+			msg := []byte("transaction to sign")
 
-			err = ps.SetPartialSignature(msg)
+			if err := ps.SetPartialSignature(msg); err != nil {
+				fmt.Printf("Could not create partial signature: %v\n", err)
+				break
+			}
+
 			zPart := ps.GetPartialSignature()
 
 			partSignReq := &api.SendPartialSign{
@@ -647,7 +689,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	// Remember that one share goes to the server, this n is just the friends
 	fmt.Print("Enter number of shares for friends, at least 2 (n): ")
 	n, err := strconv.Atoi(readInput(r))
-	if err != nil {
+	if err != nil || n < 2 {
 		fmt.Println("Error: n must be a number >= 2.")
 		return
 	}
@@ -667,25 +709,39 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		fmt.Printf("- %s\n", name)
 	}
 
-	fmt.Printf("Enter %d friend names, comma separated: ", n-1)
+	fmt.Printf("Enter %d friend names, comma separated: ", n)
 	chosenStr := readInput(r)
 	chosenStr = strings.TrimSpace(chosenStr)
-	chosenNames := strings.Split(chosenStr, ",")
+	rawChosenNames := strings.Split(chosenStr, ",")
 
+	var chosenNames []string
 	var friendKeys [][]byte
-	for _, cn := range chosenNames {
+
+	for _, cn := range rawChosenNames {
 		name := strings.TrimSpace(cn)
+		if name == "" {
+			fmt.Println("Error: please provide valid contact names separated by commas.")
+			return
+		}
+
 		keyHex, ok := db.Contacts[name]
 		if !ok {
 			fmt.Printf("Error: Contact '%s' not found.\n", name)
 			return
 		}
-		kb, _ := hex.DecodeString(keyHex)
+
+		kb, err := hex.DecodeString(keyHex)
+		if err != nil {
+			fmt.Printf("Error: stored public key for contact '%s' is invalid.\n", name)
+			return
+		}
+
+		chosenNames = append(chosenNames, name)
 		friendKeys = append(friendKeys, kb)
 	}
 
 	if len(friendKeys) != n {
-		fmt.Printf("Error: You must select exactly %d friends (one share is for the server).\n", n-1)
+		fmt.Printf("Error: You must select exactly %d friends.\n", n)
 		return
 	}
 
@@ -714,7 +770,7 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	// TODO: il secret scalar non lo devo fare con la privKey del wallet?
 
 	var dealer crypto.Dealer
-	dealer.SetTsParameters(n+1, k+1)
+	dealer.SetTsParameters(n, k)
 	dealer.SetSecret()
 	dealer.SetFriends(chosenNames)
 	dealer.SetCommAndShares()
@@ -768,6 +824,10 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	for i, cn := range chosenNames {
 		friendName := strings.TrimSpace(cn)
 
+		if friendName == "" {
+			fmt.Println("Error: please provide valid contact names separated by commas.")
+			return
+		}
 		share_1 := dealer.GetParticipantShares(i)
 		shareBytes := share_1.Bytes()
 
@@ -871,11 +931,6 @@ func loginAndUnlock(db *LocalDB) error {
 		targetDuration := 3 * time.Second
 
 		err = bcrypt.CompareHashAndPassword(db.MyIdentity.PasswordHash, passwordBytes)
-		
-		if err == nil {
-			fmt.Println("Database unlocked succesfully!")
-			return nil
-		}
 
 		if err == nil {
 			fmt.Println("Database unlocked succesfully!")

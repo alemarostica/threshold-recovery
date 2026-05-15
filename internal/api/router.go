@@ -63,6 +63,20 @@ func NewHandler(
 	}
 }
 
+func findSigningSessionByID(sessionID []byte) (*SigningSession, bool) {
+	for _, signingSession := range activeSignings {
+		session := signingSession.Signer.GetSession()
+		if bytes.Equal(session.GetID(), sessionID) {
+			return signingSession, true
+		}
+	}
+	return nil, false
+}
+
+func expectedSigningMaterialCount(s *SigningSession) int {
+	return len(s.Signer.GetIndices()) + 1 // participants + server
+}
+
 // TODO: bisogna signare tipo tutte le richieste della signature e verificare, damn
 // E aggiornare il logging con la roba signata
 
@@ -94,28 +108,21 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
-	if !(len(foundSession.Materials1) == len(foundSession.Signer.GetIndices())) ||
-		!(len(foundSession.Materials2) == len(foundSession.Signer.GetIndices())) {
+	expected := expectedSigningMaterialCount(foundSession)
+
+	if len(foundSession.Materials1) != expected ||
+		len(foundSession.Materials2) != expected {
 		http.Error(w, "Not all material is present", http.StatusServiceUnavailable)
 		return
 	}
 
-	if len(foundSession.PartialSignatures) == len(foundSession.Signer.GetIndices()) {
+	if len(foundSession.PartialSignatures) == expected {
 		// sort
 		slices.SortFunc(foundSession.PartialSignatures, func(a, b crypto.PartialSignature) int {
 			return cmp.Compare(a.GetIndex(), b.GetIndex())
@@ -146,27 +153,39 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
-	if !(len(foundSession.Materials1) == len(foundSession.Signer.GetIndices())) ||
-		!(len(foundSession.Materials2) == len(foundSession.Signer.GetIndices())) {
+	expected := expectedSigningMaterialCount(foundSession)
+
+	if len(foundSession.Materials1) != expected ||
+		len(foundSession.Materials2) != expected {
 		http.Error(w, "Not all material is present", http.StatusServiceUnavailable)
 		return
 	}
 
+	idx := req.PartialSignature.GetIndex()
+	sess := foundSession.Signer.GetSession()
+
+	if idx == crypto.ServerID {
+		http.Error(w, "server partial signature is managed internally", http.StatusForbidden)
+		return
+	}
+
+	if !sess.HasSigner(idx) {
+		http.Error(w, "partial signature index is not part of this session", http.StatusForbidden)
+		return
+	}
+
+	for _, existing := range foundSession.PartialSignatures {
+		if existing.GetIndex() == idx {
+			http.Error(w, "partial signature for this index already submitted", http.StatusConflict)
+			return
+		}
+	}
 	foundSession.PartialSignatures = append(foundSession.PartialSignatures, req.PartialSignature)
 
 	w.WriteHeader(http.StatusOK)
@@ -182,37 +201,21 @@ func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
+	expected := expectedSigningMaterialCount(foundSession)
 
-	if !(len(foundSession.Materials1) == len(foundSession.Signer.GetIndices())) ||
-		!(len(foundSession.Materials2) == len(foundSession.Signer.GetIndices())) {
-		http.Error(w, "Not all material is present", http.StatusServiceUnavailable)
+	if len(foundSession.Materials1) != expected {
+		http.Error(w, "Not all m1 material is present", http.StatusServiceUnavailable)
 		return
 	}
 
-	if !foundSession.Sorted {
-		sortMaterials(foundSession)
-	}
-
-	if !foundSession.Verified {
-		if err := verifyNonces(foundSession); err != nil {
-			http.Error(w, "Failure verifying nonces", http.StatusExpectationFailed)
-			return
-		}
-	}
+	slices.SortFunc(foundSession.Materials1, func(a, b crypto.MaterialToSend1) int {
+		return cmp.Compare(a.GetIndex(), b.GetIndex())
+	})
 
 	var resp_array []M1_dto
 	for _, item := range foundSession.Materials1 {
@@ -237,25 +240,17 @@ func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 
 	signMu.Lock()
 	defer signMu.Unlock()
-
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
-	if !(len(foundSession.Materials1) == len(foundSession.Signer.GetIndices())) ||
-		!(len(foundSession.Materials2) == len(foundSession.Signer.GetIndices())) {
-		http.Error(w, "Not all material is present", http.StatusServiceUnavailable)
+	expected := expectedSigningMaterialCount(foundSession)
+
+	if len(foundSession.Materials1) != expected ||
+		len(foundSession.Materials2) != expected {
+		http.Error(w, "Not all nonce material is present", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -294,25 +289,39 @@ func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
+	idx := crypto.ParticipantID(req.Index)
+
+	sess := foundSession.Signer.GetSession()
+	if idx == crypto.ServerID {
+		http.Error(w, "server material is managed internally", http.StatusForbidden)
+		return
+	}
+
+	if !sess.HasSigner(idx) {
+		http.Error(w, "index is not a signer of this session", http.StatusForbidden)
+		return
+	}
+
+	for _, existing := range foundSession.Materials1 {
+		if existing.GetIndex() == idx {
+			http.Error(w, "m1 for this index already submitted", http.StatusConflict)
+			return
+		}
+	}
+
 	var m1 crypto.MaterialToSend1
-	m1.SetIndex(crypto.ParticipantID(req.Index))
+	m1.SetIndex(idx)
 	m1.SetCommit(req.Ci)
+
 	foundSession.Materials1 = append(foundSession.Materials1, m1)
+	foundSession.Sorted = false
+	foundSession.Verified = false
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -327,30 +336,45 @@ func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
-	found := ""
-	var foundSession *SigningSession
-	for i, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), req.SessionID) {
-			found = i
-			foundSession = signingSession
-		}
-	}
-
-	if found == "" {
+	foundSession, ok := findSigningSessionByID(req.SessionID)
+	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
-	var m2 crypto.MaterialToSend2
-	m2.SetIndex(crypto.ParticipantID(req.Index))
-	Ri, _ := new(crypto.Point).SetBytes(req.Ri)
-	m2.SetRi(*Ri)
-	foundSession.Materials2 = append(foundSession.Materials2, m2)
+	idx := crypto.ParticipantID(req.Index)
 
-	slices.SortFunc(foundSession.Materials2, func(a, b crypto.MaterialToSend2) int {
-		return cmp.Compare(a.GetIndex(), b.GetIndex())
-	})
+	sess := foundSession.Signer.GetSession()
+	if idx == crypto.ServerID {
+		http.Error(w, "server material is managed internally", http.StatusForbidden)
+		return
+	}
+
+	if !sess.HasSigner(idx) {
+		http.Error(w, "index is not a signer of this session", http.StatusForbidden)
+		return
+	}
+
+	for _, existing := range foundSession.Materials2 {
+		if existing.GetIndex() == idx {
+			http.Error(w, "m2 for this index already submitted", http.StatusConflict)
+			return
+		}
+	}
+
+	Ri, err := new(crypto.Point).SetBytes(req.Ri)
+	if err != nil {
+		http.Error(w, "invalid Ri encoding", http.StatusBadRequest)
+		return
+	}
+
+	var m2 crypto.MaterialToSend2
+	m2.SetIndex(idx)
+	m2.SetRi(*Ri)
+
+	foundSession.Materials2 = append(foundSession.Materials2, m2)
+	foundSession.Sorted = false
+	foundSession.Verified = false
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -409,9 +433,16 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			WalletPubKeyHex: walletHex,
 			Threshold:       wallet.ThresholdParams.K,
 			TotalN:          wallet.ThresholdParams.N,
-			Participants:    []crypto.ParticipantID{crypto.ServerID},
+			Participants:    []crypto.ParticipantID{},
+			Usernames:       []string{},
 		}
 		pendingSignings[walletHex] = pending
+	}
+
+	// No participant can have index o
+	if req.ParticipantID == crypto.ServerID {
+		http.Error(w, "server cannot join as a participant", http.StatusBadRequest)
+		return
 	}
 
 	// Il partecipante partecipa già?
@@ -433,6 +464,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		share, err := new(crypto.Scalar).SetCanonicalBytes(wallet.ServerShare)
 		if err != nil {
 			http.Error(w, "Could not rebuild server share", http.StatusInternalServerError)
+			return
 		}
 		serverPart.SetShare(*share)
 		serverPart.SetParams(&wallet.ThresholdParams)
@@ -442,7 +474,11 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		ss.SetIndices(session.GetIndices())
 		ss.SetSession(session)
 		ss.SetLagrangeCoefficient()
-		point, _ := new(crypto.Point).SetBytes(wallet.P)
+		point, err := new(crypto.Point).SetBytes(wallet.P)
+		if err != nil {
+			http.Error(w, "Could not rebuild wallet public key", http.StatusInternalServerError)
+			return
+		}
 		ss.SetP(*point)
 
 		// what is this indexhash all about?
@@ -525,6 +561,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			P:           point.Bytes(),
 			Usernames:   session.GetUsernames(),
 		})
+		return
 	}
 
 	json.NewEncoder(w).Encode(SignInitResponse{
@@ -606,7 +643,11 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	var rebuiltCommitments crypto.Commitment
 	for _, b := range req.Commitments {
-		p, _ := edwards25519.NewIdentityPoint().SetBytes(b)
+		p, err := edwards25519.NewIdentityPoint().SetBytes(b)
+		if err != nil {
+			http.Error(w, "invalid commitment encoding", http.StatusBadRequest)
+			return
+		}
 		rebuiltCommitments = append(rebuiltCommitments, *p)
 	}
 
@@ -659,7 +700,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 
 	participant, _, err := h.Service.GetParticipant(req.Username)
 	if err != nil {
-		fmt.Printf("Could not retrieve participant '%s': %v\n", req.Username, err)
+		http.Error(w, fmt.Sprintf("Participant %q does not exist", req.Username), http.StatusForbidden)
 		return
 	}
 
@@ -670,7 +711,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 
 	// Let's try to prevent replay attacks
 	requestTime := time.Unix(req.Timestamp, 0)
-	if time.Since(requestTime).Abs() < time.Minute {
+	if time.Since(requestTime).Abs() > time.Minute {
 		http.Error(w, "Invalid timestamp", http.StatusUnauthorized)
 		return
 	}

@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -77,7 +76,7 @@ func main() {
 	}
 
 	// TODO: bruh decidere se inviarla o hardcodarla
-	fmt.Printf("Server pubKey: %s\n", serverPub)
+	log.Printf("Server pubKey: %s", hex.EncodeToString(serverPub))
 
 	alphaPath := filepath.Join(cfg.DataDir, "alpha")
 	var alpha *edwards25519.Scalar
