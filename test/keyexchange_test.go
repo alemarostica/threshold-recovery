@@ -15,18 +15,6 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// Uncomment only for single file testing.
-
-func logSection(t *testing.T, title string) {
-	t.Helper()
-	t.Logf("\n========== %s ==========", title)
-}
-
-func logOK(t *testing.T, msg string) {
-	t.Helper()
-	t.Logf("[OK] %s", msg)
-}
-
 // Interface implementation.
 
 type RealCrypto struct{}

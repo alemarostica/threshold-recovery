@@ -547,64 +547,16 @@ func (ps *ParticipantSigner) GetPartialSignature() PartialSignature {
 //
 // The resulting signature is (R, Z).
 func (ps *ParticipantSigner) CombineSignature(parSig []PartialSignature) error {
-	if len(parSig) != len(ps.indices) {
-		return errors.New("ps.CombineSignature failed: invalid number of partial signatures")
+	if ps == nil {
+		return errors.New("ps.CombineSignature failed: participant signer is nil")
 	}
 
-	// Reject the identity Point, which would make the Schnorr signature invalid.
-	if ps.R.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return errors.New("ps.CombineSignature failed: invalid R (identity point)")
+	sig, err := combineSignatureAux("ps", ps.indices, ps.R, parSig)
+	if err != nil {
+		return err
 	}
 
-	// Track the expected signer indices to reject missing, duplicate, or unexpected
-	// partial signatures.
-	expected := make(map[ParticipantID]bool)
-	for _, id := range ps.indices {
-		expected[id] = false
-	}
-
-	ownID := ps.p.GetID()
-	if _, ok := expected[ownID]; !ok {
-		return errors.New("ps.CombineSignature failed: own ID is not in signer set")
-	}
-	expected[ownID] = true
-
-	// Aggregate all partial z_i values.
-	z := ps.partialSig.Z
-
-	for _, el := range parSig {
-		if !el.setIndex || !el.setZ {
-			return errors.New("ps.CombineSignature failed: input is not complete")
-		}
-
-		seen, ok := expected[el.Index]
-		if !ok {
-			return errors.New("ps.CombineSignature failed: unexpected partial signature index")
-		}
-		if seen {
-			return errors.New("ps.CombineSignature failed: duplicate partial signature index")
-		}
-
-		expected[el.Index] = true
-		z.Add(&z, &el.Z)
-	}
-
-	for id, seen := range expected {
-		if !seen {
-			return fmt.Errorf("ps.CombineSignature failed: missing partial signature from index %d", id)
-		}
-	}
-
-	var zero Scalar
-	if z.Equal(&zero) == 1 {
-		return errors.New("ps.CombineSignature failed: invalid signature scalar z = 0")
-	}
-
-	ps.finalSig = Signature{
-		R: ps.R,
-		Z: z,
-	}
-
+	ps.finalSig = sig
 	return nil
 }
 
@@ -817,71 +769,16 @@ func (ss *ServerSigner) GetPartialSignature() PartialSignature {
 //
 //	Z = z_0 + sum_i {z_i}.
 func (ss *ServerSigner) CombineSignature(parSig []PartialSignature) error {
-	if !ss.indicesSet {
-		return errors.New("ss.CombineSignature failed: indices not set")
+	if ss == nil {
+		return errors.New("ss.CombineSignature failed: server signer is nil")
 	}
 
-	if len(parSig) != len(ss.indices) {
-		return errors.New("ss.CombineSignature failed: invalid number of partial signatures")
+	sig, err := combineSignatureAux("ss", ss.indices, ss.R, parSig)
+	if err != nil {
+		return err
 	}
 
-	if !ss.partialSig.setIndex || !ss.partialSig.setZ {
-		return errors.New("ss.CombineSignature failed: own partial signature is not set")
-	}
-
-	if ss.partialSig.Index != ServerID {
-		return errors.New("ss.CombineSignature failed: own partial signature has invalid server index")
-	}
-
-	if ss.R.Equal(edwards25519.NewIdentityPoint()) == 1 {
-		return errors.New("ss.CombineSignature failed: invalid R identity point")
-	}
-
-	expected := make(map[ParticipantID]bool)
-
-	for _, id := range ss.indices {
-		if expected[id] {
-			return errors.New("ss.CombineSignature failed: duplicate index in signer set")
-		}
-		expected[id] = false
-	}
-
-	z := ss.partialSig.Z
-
-	for _, el := range parSig {
-		if !el.setIndex || !el.setZ {
-			return errors.New("ss.CombineSignature failed: input partial signature is not complete")
-		}
-
-		seen, ok := expected[el.Index]
-		if !ok {
-			return fmt.Errorf("ss.CombineSignature failed: unexpected partial signature index %d", el.Index)
-		}
-
-		if seen {
-			return fmt.Errorf("ss.CombineSignature failed: duplicate partial signature for index %d", el.Index)
-		}
-
-		expected[el.Index] = true
-		z.Add(&z, &el.Z)
-	}
-
-	for id, seen := range expected {
-		if !seen {
-			return fmt.Errorf("ss.CombineSignature failed: missing partial signature from index %d", id)
-		}
-	}
-
-	var zero Scalar
-	if z.Equal(&zero) == 1 {
-		return errors.New("ss.CombineSignature failed: invalid signature scalar z = 0")
-	}
-
-	ss.finalSig = Signature{
-		R: ss.R,
-		Z: z,
-	}
-
+	ss.finalSig = sig
 	return nil
 }
 

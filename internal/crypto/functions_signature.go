@@ -146,3 +146,74 @@ func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, er
 	// Final check
 	return zG.Equal(&rhs) == 1, nil
 }
+
+func combineSignatureAux(
+	who string,
+	indices []ParticipantID,
+	R Point,
+	parSig []PartialSignature,
+) (Signature, error) {
+	if len(parSig) != len(indices)+1 {
+		return Signature{}, errors.New(who + ".CombineSignature failed: invalid number of partial signatures")
+	}
+
+	// Reject the identity point, which would make the Schnorr signature invalid.
+	if R.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return Signature{}, errors.New(who + ".CombineSignature failed: invalid R (identity point)")
+	}
+
+	// indices contains only the k signing participants.
+	// The server is required by the access policy, but it is not part of indices,
+	// so we add ServerID explicitly.
+	expected := make(map[ParticipantID]bool, len(indices)+1)
+
+	expected[ServerID] = false
+
+	for _, id := range indices {
+		if id == ServerID {
+			return Signature{}, errors.New(who + ".CombineSignature failed: server ID appears in participant set")
+		}
+
+		if _, ok := expected[id]; ok {
+			return Signature{}, errors.New(who + ".CombineSignature failed: duplicate participant index in signer set")
+		}
+
+		expected[id] = false
+	}
+
+	var z Scalar
+
+	for _, el := range parSig {
+		if !el.setIndex || !el.setZ {
+			return Signature{}, errors.New(who + ".CombineSignature failed: input is not complete")
+		}
+
+		seen, ok := expected[el.Index]
+		if !ok {
+			return Signature{}, errors.New(who + ".CombineSignature failed: unexpected partial signature index")
+		}
+
+		if seen {
+			return Signature{}, errors.New(who + ".CombineSignature failed: duplicate partial signature index")
+		}
+
+		expected[el.Index] = true
+		z.Add(&z, &el.Z)
+	}
+
+	for id, seen := range expected {
+		if !seen {
+			return Signature{}, fmt.Errorf("%s.CombineSignature failed: missing partial signature from index %d", who, id)
+		}
+	}
+
+	var zero Scalar
+	if z.Equal(&zero) == 1 {
+		return Signature{}, errors.New(who + ".CombineSignature failed: invalid signature scalar z = 0")
+	}
+
+	return Signature{
+		R: R,
+		Z: z,
+	}, nil
+}
