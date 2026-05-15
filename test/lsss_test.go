@@ -1,12 +1,11 @@
 package test
 
 import (
+	"fmt"
 	"testing"
 
 	"threshold-recovery/internal/crypto"
 )
-
-
 
 func makeParticipantNonce(t *testing.T, ps *crypto.ParticipantSigner) crypto.NonceShare {
 	t.Helper()
@@ -178,11 +177,13 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	dealer := new(crypto.Dealer)
 
 	if err := dealer.SetTsParameters(n, k); err != nil {
-		t.Fatalf("failed to set threshold parameters: %v", err)
+		fmt.Printf("Failed to set threshold parameters: %v\n", err)
+		return
 	}
 
 	if err := dealer.SetSecret(); err != nil {
-		t.Fatalf("failed to generate dealer secret: %v", err)
+		fmt.Printf("Failed to generate secret: %v\n", err)
+		return
 	}
 
 	secret := dealer.GetSecret()

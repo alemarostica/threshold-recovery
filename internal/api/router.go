@@ -439,7 +439,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		pendingSignings[walletHex] = pending
 	}
 
-	// No participant can have index o
+	// No participant can have index 0
 	if req.ParticipantID == crypto.ServerID {
 		http.Error(w, "server cannot join as a participant", http.StatusBadRequest)
 		return
@@ -454,11 +454,16 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 
 	// hit threshold?
 	if len(pending.Participants) >= pending.Threshold {
-		session, err := crypto.NewSession(pending.Participants, pending.Usernames, pending.Threshold, pending.TotalN)
-		if err != nil {
-			http.Error(w, "Failed to create crypto session", http.StatusInternalServerError)
+		session := &crypto.Session{}
+
+		session.SetIndices(pending.Participants)
+
+		if err := session.SetID(nil); err != nil {
+			http.Error(w, "Failed to generate session ID", http.StatusInternalServerError)
 			return
 		}
+
+		session.SetIndexHash(session.GetIndices())
 
 		var serverPart crypto.Server
 		share, err := new(crypto.Scalar).SetCanonicalBytes(wallet.ServerShare)
@@ -466,6 +471,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Could not rebuild server share", http.StatusInternalServerError)
 			return
 		}
+
 		serverPart.SetShare(*share)
 		serverPart.SetParams(&wallet.ThresholdParams)
 
@@ -474,30 +480,14 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		ss.SetIndices(session.GetIndices())
 		ss.SetSession(session)
 		ss.SetLagrangeCoefficient()
+
 		point, err := new(crypto.Point).SetBytes(wallet.P)
 		if err != nil {
 			http.Error(w, "Could not rebuild wallet public key", http.StatusInternalServerError)
 			return
 		}
+
 		ss.SetP(*point)
-
-		// what is this indexhash all about?
-		session.SetIndexHash(ss.GetIndices())
-		session.SetID(nil) // bit ugly?
-
-		signingSession := &SigningSession{
-			Signer:            ss,
-			Materials1:        *new([]crypto.MaterialToSend1),
-			Materials2:        *new([]crypto.MaterialToSend2),
-			PartialSignatures: *new([]crypto.PartialSignature),
-			Message:           []byte("transaction to sign"),
-			Sorted:            false,
-			Verified:          false,
-			WalletPubKeyHex:   walletHex,
-		}
-
-		activeSignings[walletHex] = signingSession
-		delete(pendingSignings, walletHex)
 
 		var nonce crypto.NonceShare
 		if err := nonce.SetIndex(crypto.ServerID); err != nil {
@@ -527,28 +517,32 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		var m1 crypto.MaterialToSend1
 		m1.SetIndex(nonce.GetIndex())
 		m1.SetCommit(ci)
-
 		ss.SetMaterialToSend1(m1)
 
 		Ri, err := nonce.GetRi()
 		if err != nil {
-			http.Error(w, "Signing error, m2", http.StatusInternalServerError)
+			http.Error(w, "Signing error: m2", http.StatusInternalServerError)
 			return
 		}
 
 		var m2 crypto.MaterialToSend2
 		m2.SetIndex(nonce.GetIndex())
 		m2.SetRi(*Ri)
-
 		ss.SetMaterialToSend2(m2)
 
-		// Should they be ordered?
-		signingSession.Materials1 = append(signingSession.Materials1, m1)
-		signingSession.Materials2 = append(signingSession.Materials2, m2)
+		signingSession := &SigningSession{
+			Signer:            ss,
+			Materials1:        []crypto.MaterialToSend1{m1},
+			Materials2:        []crypto.MaterialToSend2{m2},
+			PartialSignatures: []crypto.PartialSignature{},
+			Message:           []byte("transaction to sign"),
+			Sorted:            false,
+			Verified:          false,
+			WalletPubKeyHex:   walletHex,
+		}
 
-		ss.SetPartialSignature(signingSession.Message)
-		sPartialSign := ss.GetPartialSignature()
-		signingSession.PartialSignatures = append(signingSession.PartialSignatures, sPartialSign)
+		activeSignings[walletHex] = signingSession
+		delete(pendingSignings, walletHex)
 
 		h.Audit.Log(walletHex, core.EventSignAttempt, "Recovery threshold reached, session started.")
 		json.NewEncoder(w).Encode(SignInitResponse{
@@ -563,13 +557,6 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	json.NewEncoder(w).Encode(SignInitResponse{
-		Status:      "waiting",
-		Message:     "waiting for more participants",
-		JoinedCount: len(pending.Participants),
-		Threshold:   pending.Threshold,
-	})
 }
 
 func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
@@ -672,6 +659,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		// TODO: change if necessary
 		ExpirationDate:  time.Now().Add(req.InactivityThreshold),
 		ThresholdParams: req.PubParams,
+		P:               req.P,
 	}
 
 	// Save it
