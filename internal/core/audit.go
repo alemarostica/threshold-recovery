@@ -10,13 +10,18 @@ type AuditEvent string
 
 const (
 	// TODO: Facciamo il loggin per bene su tutto
-	EventStatus            AuditEvent = "STATUS"
-	EventRegister          AuditEvent = "REGISTER"
-	EventLiveness          AuditEvent = "LIVENESS_UPDATE"
-	EventSignAttempt       AuditEvent = "SIGN_ATTEMPT"
-	EventSignSuccess       AuditEvent = "SIGN_SUCCESS"
-	EventSignBlocked       AuditEvent = "SIGN_BLOCKED_ACTIVE"
-	EventSignatureRetrive  AuditEvent = "SIGN_RETRIEVE"
+	EventStatus                  AuditEvent = "STATUS"
+	EventRegister                AuditEvent = "REGISTER"
+	EventLiveness                AuditEvent = "LIVENESS_UPDATE"
+	EventSignAttempt             AuditEvent = "SIGN_ATTEMPT"
+	EventSignSuccess             AuditEvent = "SIGN_SUCCESS"
+	EventSignBlocked             AuditEvent = "SIGN_BLOCKED_ACTIVE"
+	EventSignThreshold           AuditEvent = "SIGN_THRESH_REACHED"
+	EventSignatureRetrive        AuditEvent = "SIGN_RETRIEVE"
+	EventParticipantRegisterFail AuditEvent = "PART_REG_FAILURE"
+	EventParticipantRegister     AuditEvent = "PART_REG"
+	EventWalletRegisterFail      AuditEvent = "WALL_REG_FAIL"
+	EventLivenessUpdateFail      AuditEvent = "LIV_UPDATE_FAIL"
 )
 
 // Every security log is appended to a file

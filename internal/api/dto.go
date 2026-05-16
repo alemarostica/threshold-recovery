@@ -84,6 +84,7 @@ type SignInitRequest struct {
 	WalletPubKey   []byte               `json:"wallet_pub_key"`
 	WalletUsername string               `json:"username"`
 	ParticipantID  crypto.ParticipantID `json:"participant_id"`
+	Requester      string               `json:"requester"`
 }
 
 type SignInitResponse struct {
@@ -92,9 +93,8 @@ type SignInitResponse struct {
 	SessionID   []byte                 `json:"session,omitempty"`
 	VectorV     []crypto.ParticipantID `json:"vector_v,omitempty"`
 	JoinedCount int                    `json:"joined_count,omitempty"`
-	Threshold   int                    `json:"threshold,omitempty"`
-	P           []byte                 `json:"point"`
-	Usernames   []string               `json:"usernames"`
+	P           []byte                 `json:"point,omitempty"`
+	Usernames   []string               `json:"usernames,omitempty"`
 }
 
 type SignCommitment struct {
@@ -116,12 +116,14 @@ type SetM1Request struct {
 	SessionID []byte               `json:"session_id"`
 	Ci        []byte               `json:"ci"`
 	Index     crypto.ParticipantID `json:"index"`
+	Username  string               `json:"username"`
 }
 
 type SetM2Request struct {
 	SessionID []byte               `json:"session_id"`
-	Ri        []byte               `json:"ci"`
+	Ri        []byte               `json:"ri"`
 	Index     crypto.ParticipantID `json:"index"`
+	Username  string               `json:"username"`
 }
 
 type M1_dto struct {
@@ -135,6 +137,7 @@ type M2_dto struct {
 }
 
 type GetM1Request struct {
+	Username  string `json:"username"`
 	SessionID []byte `json:"session_id"`
 }
 
@@ -143,6 +146,7 @@ type GetM1Response struct {
 }
 
 type GetM2Request struct {
+	Username  string `json:"username"`
 	SessionID []byte `json:"session_id"`
 }
 
@@ -151,14 +155,51 @@ type GetM2Response struct {
 }
 
 type SendPartialSign struct {
+	Username         string                  `json:"username"`
 	SessionID        []byte                  `json:"session_id"`
 	PartialSignature crypto.PartialSignature `json:"partial_signature"`
 }
 
 type GetPartialSigns struct {
+	Username  string `json:"username"`
 	SessionID []byte `json:"session_id"`
 }
 
 type GetPartialSignsResp struct {
 	PartialSignatures []crypto.PartialSignature `json:"partial_signatures"`
+}
+
+type SignedSignInitRequest struct {
+	Data      SignInitRequest `json:"data"`
+	Signature []byte          `json:"signature"`
+}
+
+type SignedSetM1Request struct {
+	Data      SetM1Request `json:"data"`
+	Signature []byte       `json:"signature"`
+}
+
+type SignedSetM2Request struct {
+	Data      SetM2Request `json:"data"`
+	Signature []byte       `json:"signature"`
+}
+
+type SignedGetM1Request struct {
+	Data      GetM1Request `json:"data"`
+	Signature []byte       `json:"signature"`
+}
+
+type SignedGetM2Request struct {
+	Data      GetM2Request `json:"data"`
+	Signature []byte       `json:"signature"`
+}
+
+type SignedSendPartialSign struct {
+	Data      SendPartialSign `json:"data"`
+	Signature []byte          `json:"signature"`
+}
+
+type SignedGetPartialSigns struct {
+	Data      GetPartialSigns `json:"data"`
+	Signature []byte          `json:"signature"`
 }

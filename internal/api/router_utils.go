@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"slices"
@@ -25,6 +26,7 @@ type SigningSession struct {
 	Verified          bool
 	Signature         crypto.Signature
 	WalletPubKeyHex   string
+	RetrievedBy       map[string]bool
 }
 
 // is it necessary?
@@ -60,4 +62,18 @@ func verifyNonces(session *SigningSession) error {
 	session.Verified = true
 
 	return nil
+}
+
+func findSigningSessionByID(sessionID []byte) (*SigningSession, bool) {
+	for _, signingSession := range activeSignings {
+		session := signingSession.Signer.GetSession()
+		if bytes.Equal(session.GetID(), sessionID) {
+			return signingSession, true
+		}
+	}
+	return nil, false
+}
+
+func expectedSigningMaterialCount(s *SigningSession) int {
+	return len(s.Signer.GetIndices()) + 1 // participants + server
 }

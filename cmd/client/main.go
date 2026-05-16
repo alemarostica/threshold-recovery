@@ -155,7 +155,7 @@ func main() {
 		case "3":
 			createWallet(reader, db)
 		case "4":
-			initializePartialSign(db, dir)
+			initializePartialSign(db)
 		case "5":
 			listCreatedWallets(db)
 		case "0":
@@ -407,7 +407,7 @@ func pingAllWallets(db *LocalDB) {
 	}
 }
 
-func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
+func initializePartialSign(db *LocalDB) {
 	if len(db.ReceivedShares) == 0 {
 		fmt.Println("No shares found in local database.")
 		return
@@ -429,16 +429,26 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 	selected := db.ReceivedShares[idx]
 
 	fmt.Println("Checking wallet status and joining recovery pool on server...")
+
+	fmt.Printf("selected share pub: %s\n", hex.EncodeToString(selected.WalletPub))
+
 	initReq := api.SignInitRequest{
+		Requester:      db.MyIdentity.Name,
 		WalletPubKey:   selected.WalletPub,
 		WalletUsername: selected.Username,
 		ParticipantID:  crypto.ParticipantID(selected.Index),
 	}
 
-	// unelegant ahh polling
+	initBytes, _ := json.Marshal(initReq)
+	signedInitReq := api.SignedSignInitRequest{
+		Data:      initReq,
+		Signature: ed25519.Sign(db.MyIdentity.PrivateKey, initBytes),
+	}
+
+	// unelegant polling
 	for {
 		var resp api.SignInitResponse
-		err := callAPI("POST", "/sign/init", initReq, &resp)
+		err := callAPI("POST", "/sign/init", signedInitReq, &resp)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			return
@@ -508,13 +518,20 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 			ps.SetMaterialToSend1(m1)
 
-			setM1Req := &api.SetM1Request{
+			setM1Req := api.SetM1Request{
+				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
 				Ci:        m1.GetCommit(),
 				Index:     m1.GetIndex(),
 			}
 
-			if err := callAPI("POST", "/sign/setm1", setM1Req, nil); err != nil {
+			setM1Bytes, _ := json.Marshal(setM1Req)
+			signedSetM1Req := &api.SignedSetM1Request{
+				Data:      setM1Req,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, setM1Bytes),
+			}
+
+			if err := callAPI("POST", "/sign/setm1", signedSetM1Req, nil); err != nil {
 				fmt.Printf("Could not send M1: %v\n", err)
 				return
 			}
@@ -531,8 +548,15 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 			ps.SetMaterialToSend2(m2)
 
-			getM1Req := &api.GetM1Request{
+			getM1Req := api.GetM1Request{
+				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
+			}
+
+			getM1Bytes, _ := json.Marshal(getM1Req)
+			signedGetM1Req := &api.SignedGetM1Request{
+				Data:      getM1Req,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, getM1Bytes),
 			}
 
 			ticker := time.NewTicker(3 * time.Second)
@@ -540,7 +564,7 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 			var allM1resp api.GetM1Response
 			for range ticker.C {
-				if err := callAPI("POST", "/sign/getm1", getM1Req, &allM1resp); err != nil {
+				if err := callAPI("POST", "/sign/getm1", signedGetM1Req, &allM1resp); err != nil {
 					fmt.Printf("Could not get M1 array: %v\n", err)
 					continue
 				}
@@ -560,24 +584,38 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 			})
 
 			RiPoint := m2.GetRi()
-			setM2Req := &api.SetM2Request{
+			setM2Req := api.SetM2Request{
+				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
 				Ri:        RiPoint.Bytes(),
 				Index:     m2.GetIndex(),
 			}
 
-			for err := callAPI("POST", "/sign/setm2", setM2Req, nil); err != nil; {
+			setM2Bytes, _ := json.Marshal(setM2Req)
+			signedSetM2Req := &api.SignedSetM2Request{
+				Data:      setM2Req,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, setM2Bytes),
+			}
+
+			for err := callAPI("POST", "/sign/setm2", signedSetM2Req, nil); err != nil; {
 				fmt.Printf("Could not send M2: %v\n", err)
 				return
 			}
 
-			getM2Req := &api.GetM2Request{
+			getM2Req := api.GetM2Request{
+				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
+			}
+
+			getM2Bytes, _ := json.Marshal(getM2Req)
+			signedGetM2Req := &api.SignedGetM2Request{
+				Data:      getM2Req,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, getM2Bytes),
 			}
 
 			var allM2resp api.GetM2Response
 			for range ticker.C {
-				if err := callAPI("POST", "/sign/getm2", getM2Req, &allM2resp); err != nil {
+				if err := callAPI("POST", "/sign/getm2", signedGetM2Req, &allM2resp); err != nil {
 					fmt.Printf("Could not get M2 array: %v\n", err)
 					continue
 				}
@@ -616,6 +654,8 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 					return
 				}
 
+				fmt.Printf("m1: %v\nm2: %v\n", allM1[i], allM2[i])
+
 				ok, err := ps.VerifyNonce(&allM1[i], &allM2[i])
 				if err != nil {
 					fmt.Printf("Error verifying nonce for participant %d: %v\n", allM1[i].GetIndex(), err)
@@ -624,7 +664,7 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 				if !ok {
 					fmt.Printf("Nonce for participant %d did not verify.\n", allM1[i].GetIndex())
-					return
+					continue
 				}
 			}
 
@@ -643,22 +683,37 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 			zPart := ps.GetPartialSignature()
 
-			partSignReq := &api.SendPartialSign{
+			partSignReq := api.SendPartialSign{
+				Username:         db.MyIdentity.Name,
 				SessionID:        session.GetID(),
 				PartialSignature: zPart,
 			}
 
-			if err = callAPI("POST", "/sign/part", partSignReq, nil); err != nil {
+			partSignBytes, _ := json.Marshal(partSignReq)
+			signedPartSignReq := &api.SignedSendPartialSign{
+				Data:      partSignReq,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, partSignBytes),
+			}
+
+			if err = callAPI("POST", "/sign/part", signedPartSignReq, nil); err != nil {
 				fmt.Printf("Could not send partial signature: %v\n", err)
 				break
 			}
 
-			getPartSignReq := &api.GetPartialSigns{
+			getPartSignReq := api.GetPartialSigns{
+				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
 			}
+
+			getPartSignBytes, _ := json.Marshal(getPartSignReq)
+			signedGetPartSignReq := &api.SignedGetPartialSigns{
+				Data:      getPartSignReq,
+				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, getPartSignBytes),
+			}
+
 			var signResp api.GetPartialSignsResp
 
-			for err = callAPI("POST", "/sign/getSign", getPartSignReq, &signResp); err != nil; {
+			for err = callAPI("POST", "/sign/getSign", signedGetPartSignReq, &signResp); err != nil; {
 				fmt.Printf("Trying to fetch partial signatures...")
 				time.Sleep(3 * time.Second)
 			}
@@ -673,7 +728,7 @@ func initializePartialSign(db *LocalDB, dir *ClientDirectory) {
 
 			break
 		} else if resp.Status == "waiting" {
-			fmt.Printf("\rWaiting for other participants... (%d/%d)", resp.JoinedCount, resp.Threshold)
+			fmt.Println("\rWaiting for other participants...")
 			time.Sleep(3 * time.Second)
 		} else {
 			fmt.Printf("\nABORT: %s\n", resp.Message)
@@ -759,13 +814,11 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	// We generate an ed25519 key
 	// In a real application the user would input his wallet's key
 	// C'mon, this is just a demo
-	walletPubkey, walletPrivKey, err := ed25519.GenerateKey(rand.Reader)
+	walletPubkey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Printf("Failed to generate wallet keys: %v\n", err)
 		return
 	}
-
-	fmt.Printf("Wallet privKey: %v\n", walletPrivKey)
 
 	// TODO: il secret scalar non lo devo fare con la privKey del wallet?
 
@@ -831,10 +884,12 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 		share_1 := dealer.GetParticipantShares(i)
 		shareBytes := share_1.Bytes()
 
+		// edwards25519's struct fields are private, have to reverse unfortunately
+		// or they can't be marshaled
 		share := keyexchange.ShareMessage{
 			Index:       i + 1,
 			Share:       shareBytes,
-			Commitments: commBytes, // TODO: fix this reversing shit
+			Commitments: commBytes,
 			PubParams:   dealer.GetTsParameters(),
 			Username:    db.MyIdentity.Name,
 			WalletPub:   walletPubkey,
@@ -976,7 +1031,7 @@ func printMenu(db *LocalDB) {
 	fmt.Println(" 2. Add a Contact                    5. List My Created Wallets")
 	fmt.Println(" 3. Create New Wallet (Dealer)       0. Exit")
 	fmt.Println("==================================================================")
-	fmt.Printf("Server Pub: %s\n", db.ServerPub)
+	fmt.Printf("Server Pub: %s\n", hex.EncodeToString(db.ServerPub))
 }
 
 func showIdentity(db *LocalDB) {

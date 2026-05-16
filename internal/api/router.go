@@ -2,7 +2,6 @@
 package api
 
 import (
-	"bytes"
 	"cmp"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -23,8 +22,6 @@ var (
 	inbox      = make(map[string][]keyexchange.Message)
 	inboxMutex sync.RWMutex
 
-	// a bit controintuitivo perché il signer ha dentro la sessione e non viceversa
-	// but oh well
 	activeSignings  = make(map[string]*SigningSession)
 	pendingSignings = make(map[string]*PendingSign)
 	signMu          sync.Mutex
@@ -63,27 +60,10 @@ func NewHandler(
 	}
 }
 
-func findSigningSessionByID(sessionID []byte) (*SigningSession, bool) {
-	for _, signingSession := range activeSignings {
-		session := signingSession.Signer.GetSession()
-		if bytes.Equal(session.GetID(), sessionID) {
-			return signingSession, true
-		}
-	}
-	return nil, false
-}
-
-func expectedSigningMaterialCount(s *SigningSession) int {
-	return len(s.Signer.GetIndices()) + 1 // participants + server
-}
-
-// TODO: bisogna signare tipo tutte le richieste della signature e verificare, damn
-// E aggiornare il logging con la roba signata
-
 // Register the endpoints
 // Every specific endpoint will execute the specific handler
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /register", h.handleRegister)
+	mux.HandleFunc("POST /register", h.handleRegisterWallet)
 	mux.HandleFunc("POST /liveness", h.handleLiveness)
 	mux.HandleFunc("POST /participants", h.handleParticipantRegister)
 	mux.HandleFunc("GET /participants", h.handleGetParticipants)
@@ -99,9 +79,23 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
-	var req GetPartialSigns
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedGetPartialSigns
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil {
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
+		return
+	}
+
+	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -136,7 +130,18 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 		PartialSignatures: foundSession.PartialSignatures,
 	}
 
-	// TODO: aggiungere logica che elimina la sessione quando quando tutti hanno retrievato la signature
+	foundSession.RetrievedBy[req.Username] = true
+
+	expectedFriends := expectedSigningMaterialCount(foundSession) - 1
+
+	if len(foundSession.RetrievedBy) >= expectedFriends {
+		delete(activeSignings, foundSession.WalletPubKeyHex)
+		log := fmt.Sprintf("SIGNATURE: %s retrieved the last signature. Session closed.", req.Username)
+		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, log)
+	} else {
+		log := fmt.Sprintf("SIGNAUTRE: %s retrieved signature (%d/%d)", req.Username, len(foundSession.RetrievedBy), expectedFriends)
+		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignatureRetrive, log)
+	}
 
 	log := fmt.Sprintf("SIGNATURE: %s tried to retrieve signature\n", "USERNAME_PLACEHOLDER")
 	h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignatureRetrive, log)
@@ -144,20 +149,30 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
-	var req SendPartialSign
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedSendPartialSign
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	signMu.Lock()
-	defer signMu.Unlock()
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
 
 	foundSession, ok := findSigningSessionByID(req.SessionID)
 	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignAttempt, "Unauthorized attempt to send partial signatures")
+		http.Error(w, "Participant does not exist", http.StatusUnauthorized)
+		return
+	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	expected := expectedSigningMaterialCount(foundSession)
 
@@ -192,9 +207,23 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
-	var req GetM1Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedGetM1Request
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil {
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
+		return
+	}
+
+	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -232,9 +261,23 @@ func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
-	var req GetM2Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedGetM2Request
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil {
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
+		return
+	}
+
+	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -260,6 +303,10 @@ func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 
 	if !foundSession.Verified {
 		if err := verifyNonces(foundSession); err != nil {
+			// Destroy session if nonce verification failed
+			delete(activeSignings, foundSession.WalletPubKeyHex)
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignBlocked, "Nonce verification failed, session destroyed.")
+
 			http.Error(w, "Failure verifying nonces", http.StatusExpectationFailed)
 			return
 		}
@@ -280,20 +327,30 @@ func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
-	var req SetM1Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedSetM1Request
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	signMu.Lock()
-	defer signMu.Unlock()
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
 
 	foundSession, ok := findSigningSessionByID(req.SessionID)
 	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignAttempt, "Unauthorized M1 set attempt")
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
+		return
+	}
+
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	idx := crypto.ParticipantID(req.Index)
 
@@ -323,24 +380,35 @@ func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 	foundSession.Sorted = false
 	foundSession.Verified = false
 
+	h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignAttempt, fmt.Sprintf("Participant %s uploaded M1 commitments", req.Username))
+
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
-	var req SetM2Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedSetM2Request
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	signMu.Lock()
-	defer signMu.Unlock()
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
 
 	foundSession, ok := findSigningSessionByID(req.SessionID)
 	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
+
+	participant, _, err := h.Service.GetParticipant(req.Username)
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignAttempt, "Unauthorized M2 set attempt")
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
+		return
+	}
+	signMu.Lock()
+	defer signMu.Unlock()
 
 	idx := crypto.ParticipantID(req.Index)
 
@@ -376,25 +444,37 @@ func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 	foundSession.Sorted = false
 	foundSession.Verified = false
 
+	h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignAttempt, fmt.Sprintf("Participant %s uploaded M2 commitments", req.Username))
+
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
-	var req SignInitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var signedReq SignedSignInitRequest
+	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
-	participant, _, err := h.Service.GetParticipant(req.WalletUsername)
-	if err != nil {
-		http.Error(w, "User not found", http.StatusNotFound)
+	req := signedReq.Data
+	dataBytes, _ := json.Marshal(req)
+
+	participant, _, err := h.Service.GetParticipant(req.Requester)
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(req.Requester, core.EventSignBlocked, fmt.Sprintf("Unathorized signature initialization attempt by %s", req.Requester))
+		http.Error(w, "Participant does not exist", http.StatusForbidden)
 		return
 	}
 
-	wallet, err := h.Service.GetWallet(req.WalletPubKey, participant.PublicKey)
+	walletOwner, _, err := h.Service.GetParticipant(req.WalletUsername)
 	if err != nil {
-		http.Error(w, "Wallet not found", http.StatusNotFound)
+		http.Error(w, "Invalid wallet parameters", http.StatusBadRequest)
+		return
+	}
+
+	wallet, err := h.Service.GetWallet(req.WalletPubKey, walletOwner.PublicKey)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Wallet not found: %v", err), http.StatusNotFound)
 		return
 	}
 
@@ -416,12 +496,16 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 
 	if signingSession, active := activeSignings[walletHex]; active {
 		session := signingSession.Signer.GetSession()
+		vectorV := session.GetIndices()
+		slices.Sort(vectorV)
 		json.NewEncoder(w).Encode(SignInitResponse{
-			Status:    "ready",
-			Message:   "Session already active",
-			SessionID: session.GetID(),
-			VectorV:   session.GetIndices(),
-			Usernames: session.GetUsernames(),
+			Status:      "ready",
+			Message:     "Threshold reached, session started.",
+			VectorV:     vectorV,
+			JoinedCount: session.GetNumParticipants(),
+			SessionID:   session.GetID(),
+			P:           signingSession.Signer.P.Bytes(),
+			Usernames:   session.GetUsernames(),
 		})
 		return
 	}
@@ -544,18 +628,38 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		activeSignings[walletHex] = signingSession
 		delete(pendingSignings, walletHex)
 
+		h.Audit.Log(walletHex, core.EventSignThreshold, fmt.Sprintf("Threshold for wallet %s reached, session started", walletHex))
+
+		// After 5 minutes the session is cleaned
+		go func(wHex string) {
+			time.Sleep(5 * time.Minute)
+			signMu.Lock()
+			defer signMu.Unlock()
+			if _, exists := activeSignings[wHex]; exists {
+				delete(activeSignings, wHex)
+				h.Audit.Log(wHex, core.EventSignBlocked, "Session timed out and was cleaned.")
+			}
+		}(walletHex)
+
 		h.Audit.Log(walletHex, core.EventSignAttempt, "Recovery threshold reached, session started.")
+		vectorV := session.GetIndices()
+		slices.Sort(vectorV)
 		json.NewEncoder(w).Encode(SignInitResponse{
 			Status:      "ready",
 			Message:     "Threshold reached, session started.",
-			VectorV:     session.GetIndices(),
+			VectorV:     vectorV,
 			JoinedCount: len(pending.Participants),
-			Threshold:   pending.Threshold,
 			SessionID:   session.GetID(),
 			P:           point.Bytes(),
 			Usernames:   session.GetUsernames(),
 		})
 		return
+	} else {
+		resp := &SignInitResponse{
+			Status:  "waiting",
+			Message: "waiting for participants",
+		}
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -592,7 +696,7 @@ func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(msgs)
 }
 
-func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
 
 	// Decode the request
@@ -603,16 +707,13 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := signedReq.Data
+	walletHex := hex.EncodeToString(req.PublicKey)
 	dataBytes, _ := json.Marshal(req)
 
 	participant, _, err := h.Service.GetParticipant(req.Username)
-	if err != nil {
-		http.Error(w, "Participant does not exist", http.StatusForbidden)
-		return
-	}
-
-	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
-		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(walletHex, core.EventWalletRegisterFail, "Unauthorized wallet creation attempt")
+		http.Error(w, "Participant does not exist", http.StatusUnauthorized)
 		return
 	}
 
@@ -671,6 +772,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	pubKeyHex := hex.EncodeToString(wallet.PublicKey)
 	h.Audit.Log(pubKeyHex, core.EventRegister, "Success")
 
+	h.Audit.Log(walletHex, core.EventRegister, fmt.Sprintf("Wallet successfully registered by %s", req.Username))
+
 	w.WriteHeader(http.StatusCreated)
 	w.Write([]byte(`{"status":"registered"}`))
 }
@@ -687,13 +790,9 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	dataBytes, _ := json.Marshal(req)
 
 	participant, _, err := h.Service.GetParticipant(req.Username)
-	if err != nil {
+	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
+		h.Audit.Log(req.Username, core.EventLivenessUpdateFail, "Liveness update rejected, invalid signature.")
 		http.Error(w, fmt.Sprintf("Participant %q does not exist", req.Username), http.StatusForbidden)
-		return
-	}
-
-	if !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {
-		http.Error(w, "Invalid request signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -735,6 +834,7 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 	}
 
 	if err := h.Service.SaveParticipant(p); err != nil {
+		h.Audit.Log(req.ID, core.EventParticipantRegisterFail, fmt.Sprintf("Registration failed: %v", err))
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
@@ -745,6 +845,8 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 		ServerPublicKey: serverPubKey,
 		Alpha:           *h.Alpha,
 	}
+
+	h.Audit.Log(req.ID, core.EventParticipantRegister, "Participant registered succesfully")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
