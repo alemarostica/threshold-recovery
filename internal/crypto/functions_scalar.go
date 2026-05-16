@@ -41,6 +41,19 @@ func scalarOne() Scalar {
 	return one
 }
 
+func scalarZero() Scalar {
+	var zero Scalar
+
+	b := make([]byte, 32)
+	b[0] = 0
+
+	if _, err := zero.SetCanonicalBytes(b); err != nil {
+		panic(err)
+	}
+
+	return zero
+}
+
 // SetAlpha returns the fixed public primitive field element alpha.
 // The paper defines threshold-gate matrices through powers of alpha. Here alpha
 // is fixed to 2 and used to evaluate the relevant entries of M without storing M.
@@ -121,5 +134,6 @@ func GenerateRandomScalars(scalars []Scalar) error {
 	return nil
 }
 
-var One = scalarOne()  // Scalar-field element 1.
-var alpha = SetAlpha() // Public alpha used in the implicit LSSS matrix.
+var One = scalarOne()   // Scalar-field element 1.
+var alpha = SetAlpha()  // Public alpha used in the implicit LSSS matrix.
+var Zero = scalarZero() // Scalar-field element 0

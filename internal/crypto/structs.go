@@ -3,6 +3,7 @@ package crypto
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"filippo.io/edwards25519"
 )
@@ -13,7 +14,7 @@ import (
 // The access policy is the threshold access tree described in the report:
 // the server leaf is combined with a (K,N)-threshold node over the friends
 // through a root (2,2)-threshold gate, as in the following scheme
-//	   (2,2)
+//   (2,2)
 //       |
 //       /\
 //  (1,1)  (n,k)
@@ -37,7 +38,7 @@ const ServerID ParticipantID = 0
 // SecretVector is the LSSS vector v used in the product v · M.
 // In our construction:
 //
-//	v = (s, r2, t_1, ..., t_{K-1})
+// v = (s, r2, t_1, ..., t_{K-1})
 //
 // where s is the dealer's secret and the remaining entries are random scalars.
 
@@ -70,9 +71,9 @@ type ThresholdParams struct {
 // Commitment stores commitments to the entries of the LSSS vector v.
 // c = (C_0, ..., C_K), where:
 //
-//	C_0 = sG,
-//	C_1 = r2G,
-//	C_j = t_{j-1}G for j = 2, ..., K.
+// C_0 = sG,
+// C_1 = r2G,
+// C_j = t_{j-1}G for j = 2, ..., K.
 //
 // These commitments are used to verify that a share equals v · M_i.
 type Commitment []Point
@@ -140,7 +141,17 @@ func (d *Dealer) SetFriends(friends []string) error {
 	if len(friends) != d.parameters.N {
 		return errors.New("d.SetFriends failed: N is not equal to the number of friends")
 	}
-	d.friends = friends
+
+	cp := make([]string, len(friends))
+	for i, name := range friends {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return errors.New("d.SetFriends failed: empty friend name")
+		}
+		cp[i] = name
+	}
+
+	d.friends = cp
 	return nil
 }
 
@@ -163,7 +174,7 @@ func (d *Dealer) SetCommAndShares() error {
 		return errors.New("d.SetCommAndShares failed: N is not set")
 	}
 
-	if d.secret.Equal(&Scalar{}) == 1 {
+	if d.secret.Equal(&Zero) == 1 {
 		return errors.New("d.SetCommAndShares failed: secret is not set")
 	}
 
@@ -233,8 +244,8 @@ func (d *Dealer) GetComm() *Commitment {
 	return &d.commitment
 }
 
-func (d *Dealer) GetParticipantShares(n int) Scalar {
-	return d.shares.ParticipantShares[n]
+func (d *Dealer) GetParticipantShares(pos int) Scalar {
+	return d.shares.ParticipantShares[pos]
 }
 
 func (d *Dealer) GetServerShare() Scalar {
@@ -262,8 +273,14 @@ func (p *Participant) GetID() ParticipantID {
 	return p.id
 }
 
-func (p *Participant) SetName(name string) {
+func (p *Participant) SetName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("participant.SetName failed: empty name")
+	}
+
 	p.name = name
+	return nil
 }
 
 func (p *Participant) GetName() string {
@@ -271,8 +288,13 @@ func (p *Participant) GetName() string {
 }
 
 // SetShare stores the participant's LSSS share s_i.
-func (p *Participant) SetShare(share Scalar) {
+func (p *Participant) SetShare(share Scalar) error {
+	if share.Equal(&Zero) == 1 {
+		return errors.New("participant.SetShare failed: share cannot be zero")
+	}
+
 	p.share = share
+	return nil
 }
 
 func (p *Participant) GetShare() Scalar {
@@ -291,12 +313,16 @@ func (p *Participant) VerifyConsistency(comm Commitment) (bool, error) {
 		return false, errors.New("p.VerifyConsistency failed: participant name is not set")
 	}
 
-	if p.share.Equal(&Scalar{}) == 1 {
+	if p.share.Equal(&Zero) == 1 {
 		return false, errors.New("p.VerifyConsistency failed: participant share is not set")
 	}
 
 	if comm == nil {
 		return false, errors.New("p.VerifyConsistency failed: invalid commitment")
+	}
+
+	if len(comm) < 3 {
+		return false, errors.New("p.VerifyConsistency failed: malformed commitment")
 	}
 
 	// For i = 1, all powers alpha^{j(i-1)} are equal to 1.
@@ -357,16 +383,30 @@ type Server struct {
 	params ThresholdParams
 }
 
-func (s *Server) SetParams(par *ThresholdParams) {
+func (s *Server) SetParams(par *ThresholdParams) error {
+	if par == nil {
+		return errors.New("server.SetParams failed: nil threshold parameters")
+	}
+
+	if par.K > par.N {
+		return errors.New("server.SetParams failed: K cannot be greater than N")
+	}
+
 	s.params = *par
+	return nil
 }
 
 func (s *Server) GetParams() ThresholdParams {
 	return s.params
 }
 
-func (s *Server) SetShare(share Scalar) {
+func (s *Server) SetShare(share Scalar) error {
+	if share.Equal(&Zero) == 1 {
+		return errors.New("server.SetShare failed: share cannot be zero")
+	}
+
 	s.share = share
+	return nil
 }
 
 func (s *Server) GetShare() Scalar {
@@ -376,15 +416,20 @@ func (s *Server) GetShare() Scalar {
 // VerifyConsistency checks the server column of M.
 // Since the server share is s_0 = s + r2, the check is:
 //
-//	s_0G == C_0 + C_1.
+// s_0G == C_0 + C_1.
 func (s *Server) VerifyConsistency(comm *Commitment) (bool, error) {
-	if s.share.Equal(&Scalar{}) == 1 {
+	if s.share.Equal(&Zero) == 1 {
 		return false, errors.New("s.VerifyConsistency failed: server share is not set")
 	}
 
 	if comm == nil {
 		return false, errors.New("s.VerifyConsistency failed: invalid commitment")
 	}
+
+	if len(*comm) < 3 {
+		return false, errors.New("s.VerifyConsistency failed: malformed commitment")
+	}
+
 	lhs := (*comm)[1]
 	lhs.Add(&lhs, &(*comm)[0]) // C_0 + C_1.
 	rhs := edwards25519.NewIdentityPoint()
