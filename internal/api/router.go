@@ -421,6 +421,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			Message:   "Session already active",
 			SessionID: session.GetID(),
 			VectorV:   session.GetIndices(),
+			P:         wallet.P,
 			Usernames: session.GetUsernames(),
 		})
 		return
@@ -456,7 +457,10 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	if len(pending.Participants) >= pending.Threshold {
 		session := &crypto.Session{}
 
-		session.SetIndices(pending.Participants)
+		indices := append([]crypto.ParticipantID(nil), pending.Participants...)
+		slices.Sort(indices)
+
+		session.SetIndices(indices)
 
 		if err := session.SetID(nil); err != nil {
 			http.Error(w, "Failed to generate session ID", http.StatusInternalServerError)
@@ -557,6 +561,13 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	json.NewEncoder(w).Encode(SignInitResponse{
+		Status:      "waiting",
+		Message:     "waiting for more participants",
+		JoinedCount: len(pending.Participants),
+		Threshold:   pending.Threshold,
+	})
 }
 
 func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
