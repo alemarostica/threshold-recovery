@@ -63,7 +63,6 @@ func (s *Session) HasSigner(id ParticipantID) bool {
 }
 
 // SetID samples a fresh identifier for this signing session.
-// Does it work?
 func (s *Session) SetID(id []byte) error {
 	sid := make([]byte, 32)
 
@@ -72,6 +71,9 @@ func (s *Session) SetID(id []byte) error {
 			return err
 		}
 	} else {
+		if len(id) != 32 {
+			return errors.New("session.SetID failed: session ID must be 32 bytes")
+		}
 		sid = id
 	}
 	s.id = sid
@@ -82,9 +84,32 @@ func (s *Session) GetID() []byte {
 	return s.id
 }
 
-// SetIndices stores the friend indices participating in this session.
-func (s *Session) SetIndices(indices []ParticipantID) {
+func (s *Session) SetIndices(indices []ParticipantID) error {
+	if len(indices) == 0 {
+		return errors.New("session.SetIndices failed: empty signer set")
+	}
+
+	slices.Sort(indices)
+
+	seen := make(map[ParticipantID]bool, len(indices))
+	for _, id := range indices {
+		if id == ServerID {
+			return errors.New("session.SetIndices failed: ServerID must not appear in participant indices")
+		}
+
+		if id < 0 {
+			return errors.New("session.SetIndices failed: negative participant ID")
+		}
+
+		if seen[id] {
+			return fmt.Errorf("session.SetIndices failed: duplicate participant ID %d", id)
+		}
+
+		seen[id] = true
+	}
+
 	s.indices = indices
+	return nil
 }
 
 func (s *Session) GetIndices() []ParticipantID {
@@ -97,21 +122,31 @@ func (s *Session) GetIndices() []ParticipantID {
 //
 // This value is included in the Schnorr challenge to bind the signature to the
 // selected reconstruction set.
-func (s *Session) SetIndexHash(ids []ParticipantID) {
-	cp := make([]ParticipantID, len(ids))
-	copy(cp, ids)
+func (s *Session) SetIndexHash(ids []ParticipantID) error {
+	if len(ids) == 0 {
+		return errors.New("session.SetIndexHash failed: empty signer set")
+	}
 
-	slices.Sort(cp)
+	slices.Sort(ids)
 
 	h := sha256.New()
 	tmp := make([]byte, 4)
 
-	for _, id := range cp {
+	for _, id := range ids {
+		if id == ServerID {
+			return errors.New("session.SetIndexHash failed: ServerID must not appear in participant indices")
+		}
+
+		if id < 0 {
+			return errors.New("session.SetIndexHash failed: negative participant ID")
+		}
+
 		binary.BigEndian.PutUint32(tmp, uint32(id))
 		h.Write(tmp)
 	}
 
 	s.indexHash = h.Sum(nil)
+	return nil
 }
 
 func (s *Session) GetIndexHash() []byte {
@@ -223,8 +258,21 @@ func (n *NonceShare) GetRi() (*Point, error) {
 // SetCommit computes the commitment c_i = H(session, i, R_i).
 //
 // This is the first round of the commit-and-reveal nonce exchange.
-func (n *NonceShare) SetCommit(sess *Session) {
+func (n *NonceShare) SetCommit(sess *Session) error {
+	if sess == nil {
+		return errors.New("nonceShare.SetCommit failed: nil session")
+	}
+
+	if !n.setRi {
+		return errors.New("nonceShare.SetCommit failed: Ri is not set")
+	}
+
+	if n.index != ServerID && !sess.HasSigner(n.index) {
+		return errors.New("nonceShare.SetCommit failed: nonce index is not part of the session")
+	}
+
 	n.ci = commitNonce(sess, n.index, n.Ri)
+	return nil
 }
 
 func (n *NonceShare) GetCommit() ([]byte, error) {
@@ -244,18 +292,28 @@ type MaterialToSend1 struct {
 	setci    bool
 }
 
-func (m *MaterialToSend1) SetIndex(index ParticipantID) {
+func (m *MaterialToSend1) SetIndex(index ParticipantID) error {
+	if index < 0 {
+		return errors.New("materialToSend1.SetIndex failed: negative index")
+	}
+
 	m.Index = index
 	m.setIndex = true
+	return nil
 }
 
 func (m *MaterialToSend1) GetIndex() ParticipantID {
 	return m.Index
 }
 
-func (m *MaterialToSend1) SetCommit(ci []byte) {
+func (m *MaterialToSend1) SetCommit(ci []byte) error {
+	if len(ci) == 0 {
+		return errors.New("materialToSend1.SetCommit failed: empty commitment")
+	}
+
 	m.ci = ci
 	m.setci = true
+	return nil
 }
 
 func (m *MaterialToSend1) GetCommit() []byte {
@@ -272,18 +330,28 @@ type MaterialToSend2 struct {
 	setRi    bool
 }
 
-func (m *MaterialToSend2) SetIndex(index ParticipantID) {
+func (m *MaterialToSend2) SetIndex(index ParticipantID) error {
+	if index < 0 {
+		return errors.New("materialToSend2.SetIndex failed: negative index")
+	}
+
 	m.Index = index
 	m.setIndex = true
+	return nil
 }
 
 func (m *MaterialToSend2) GetIndex() ParticipantID {
 	return m.Index
 }
 
-func (m *MaterialToSend2) SetRi(Ri Point) {
+func (m *MaterialToSend2) SetRi(Ri Point) error {
+	if Ri.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return errors.New("materialToSend2.SetRi failed: Ri cannot be identity")
+	}
+
 	m.Ri = Ri
 	m.setRi = true
+	return nil
 }
 
 func (m *MaterialToSend2) GetRi() Point {
@@ -369,30 +437,68 @@ func (ps *ParticipantSigner) GetLagrangeCoefficient() Scalar {
 	return ps.lagrangeCoefficient
 }
 
-// Server
-
-func (ps *ParticipantSigner) SetParticipant(p *Participant) {
+func (ps *ParticipantSigner) SetParticipant(p *Participant) error {
 	if p == nil {
-		return
+		return errors.New("participantSigner.SetParticipant failed: nil participant")
 	}
+
+	if p.GetID() == ServerID {
+		return errors.New("participantSigner.SetParticipant failed: participant cannot have ServerID")
+	}
+
+	share := p.GetShare()
+	if share.Equal(&Zero) == 1 {
+		return errors.New("participantSigner.SetParticipant failed: participant share is zero")
+	}
+
 	ps.p = *p
+	return nil
 }
 
 func (ps *ParticipantSigner) GetParticipant() *Participant {
 	return &ps.p
 }
 
-func (ps *ParticipantSigner) SetP(P Point) {
+func (ps *ParticipantSigner) SetP(P Point) error {
+	if P.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return errors.New("participantSigner.SetP failed: public key cannot be identity")
+	}
+
 	ps.P = P
+	return nil
 }
 
 func (ps *ParticipantSigner) GetP() Point {
 	return ps.P
 }
 
-func (ps *ParticipantSigner) SetIndices(inds []ParticipantID) {
-	ps.indices = inds
+func (ps *ParticipantSigner) SetIndices(ind []ParticipantID) error {
+	if len(ind) == 0 {
+		return errors.New("participantSigner.SetIndices failed: empty signer set")
+	}
+
+	slices.Sort(ind)
+
+	seen := make(map[ParticipantID]bool, len(ind))
+	for _, id := range ind {
+		if id == ServerID {
+			return errors.New("participantSigner.SetIndices failed: ServerID must not appear in participant indices")
+		}
+
+		if id < 0 {
+			return errors.New("participantSigner.SetIndices failed: negative participant ID")
+		}
+
+		if seen[id] {
+			return fmt.Errorf("participantSigner.SetIndices failed: duplicate participant ID %d", id)
+		}
+
+		seen[id] = true
+	}
+
+	ps.indices = ind
 	ps.indicesSet = true
+	return nil
 }
 
 func (ps *ParticipantSigner) GetIndices() []ParticipantID {
@@ -411,24 +517,51 @@ func (ps *ParticipantSigner) GetSession() Session {
 	return ps.sess
 }
 
-func (ps *ParticipantSigner) SetN(n NonceShare) {
+func (ps *ParticipantSigner) SetN(n NonceShare) error {
+	if !n.set_ri {
+		return errors.New("participantSigner.SetN failed: nonce scalar is not set")
+	}
+
+	if !n.setRi {
+		return errors.New("participantSigner.SetN failed: nonce point is not set")
+	}
+
 	ps.n = n
+	return nil
 }
 
 func (ps *ParticipantSigner) GetN() NonceShare {
 	return ps.n
 }
 
-func (ps *ParticipantSigner) SetMaterialToSend1(m MaterialToSend1) {
+func (ps *ParticipantSigner) SetMaterialToSend1(m MaterialToSend1) error {
+	if !m.setIndex {
+		return errors.New("participantSigner.SetMaterialToSend1 failed: index is not set")
+	}
+
+	if !m.setci {
+		return errors.New("participantSigner.SetMaterialToSend1 failed: commitment is not set")
+	}
+
 	ps.materialToSend1 = m
+	return nil
 }
 
 func (ps *ParticipantSigner) GetMaterialToSend1() MaterialToSend1 {
 	return ps.materialToSend1
 }
 
-func (ps *ParticipantSigner) SetMaterialToSend2(m MaterialToSend2) {
+func (ps *ParticipantSigner) SetMaterialToSend2(m MaterialToSend2) error {
+	if !m.setIndex {
+		return errors.New("participantSigner.SetMaterialToSend2 failed: index is not set")
+	}
+
+	if !m.setRi {
+		return errors.New("participantSigner.SetMaterialToSend2 failed: Ri is not set")
+	}
+
 	ps.materialToSend2 = m
+	return nil
 }
 
 func (ps *ParticipantSigner) GetMaterialToSend2() MaterialToSend2 {
@@ -517,11 +650,6 @@ func (ps *ParticipantSigner) SetPartialSignature(msg []byte) error {
 		return err
 	}
 
-	fmt.Printf("sign R: %x\n", ps.R.Bytes())
-	fmt.Printf("sign P: %x\n", ps.P.Bytes())
-	fmt.Printf("sign sess.id: %x\n", ps.sess.GetID())
-	fmt.Printf("sign sess.indexHash: %x\n", ps.sess.GetIndexHash())
-
 	// term = e * lambda_i * s_i.
 	var term Scalar
 	term.Multiply(&lambda, &share)
@@ -598,8 +726,13 @@ func (ss *ServerSigner) GetServer() Server {
 	return ss.s
 }
 
-func (ss *ServerSigner) SetP(P Point) {
+func (ss *ServerSigner) SetP(P Point) error {
+	if P.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return errors.New("serverSigner.SetP failed: public key cannot be identity")
+	}
+
 	ss.P = P
+	return nil
 }
 
 func (ss *ServerSigner) GetP() Point {
@@ -640,33 +773,84 @@ func (ss *ServerSigner) GetSession() Session {
 	return ss.sess
 }
 
-func (ss *ServerSigner) SetNonce(n NonceShare) {
+func (ss *ServerSigner) SetNonce(n NonceShare) error {
+	if !n.set_ri {
+		return errors.New("serverSigner.SetNonce failed: nonce scalar is not set")
+	}
+
+	if !n.setRi {
+		return errors.New("serverSigner.SetNonce failed: nonce point is not set")
+	}
+
 	ss.n = n
+	return nil
 }
 
 func (ss *ServerSigner) GetNonce() NonceShare {
 	return ss.n
 }
 
-func (ss *ServerSigner) SetIndices(ind []ParticipantID) {
+func (ss *ServerSigner) SetIndices(ind []ParticipantID) error {
+	if len(ind) == 0 {
+		return errors.New("serverSigner.SetIndices failed: empty signer set")
+	}
+
+	slices.Sort(ind)
+
+	seen := make(map[ParticipantID]bool, len(ind))
+	for _, id := range ind {
+		if id == ServerID {
+			return errors.New("serverSigner.SetIndices failed: ServerID must not appear in participant indices")
+		}
+
+		if id < 0 {
+			return errors.New("serverSigner.SetIndices failed: negative participant ID")
+		}
+
+		if seen[id] {
+			return fmt.Errorf("serverSigner.SetIndices failed: duplicate participant ID %d", id)
+		}
+
+		seen[id] = true
+	}
+
 	ss.indices = ind
 	ss.indicesSet = true
+	return nil
 }
 
 func (ss *ServerSigner) GetIndices() []ParticipantID {
 	return ss.indices
 }
 
-func (ss *ServerSigner) SetMaterialToSend1(m MaterialToSend1) {
+func (ss *ServerSigner) SetMaterialToSend1(m MaterialToSend1) error {
+	if !m.setIndex {
+		return errors.New("serverSigner.SetMaterialToSend1 failed: index is not set")
+	}
+
+	if !m.setci {
+		return errors.New("serverSigner.SetMaterialToSend1 failed: commitment is not set")
+	}
+
 	ss.materialToSend1 = m
+	return nil
 }
 
 func (ss *ServerSigner) GetMaterialToSend1() MaterialToSend1 {
 	return ss.materialToSend1
 }
 
-func (ss *ServerSigner) SetMaterialToSend2(m MaterialToSend2) {
+func (ss *ServerSigner) SetMaterialToSend2(m MaterialToSend2) error {
+	if !m.setIndex {
+		return errors.New("serverSigner.SetMaterialToSend2 failed: index is not set")
+	}
+
+	if !m.setRi {
+		return errors.New("serverSigner.SetMaterialToSend2 failed: Ri is not set")
+	}
+
 	ss.materialToSend2 = m
+	return nil
 }
 
 func (ss *ServerSigner) GetMaterialToSend2() MaterialToSend2 {

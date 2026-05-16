@@ -1,6 +1,6 @@
 package crypto
 
-import 	"filippo.io/edwards25519"
+import "filippo.io/edwards25519"
 
 // Arguably si potrebbe hardcodare, tanto é sempre quella
 func GenerateAlpha() *edwards25519.Scalar {
