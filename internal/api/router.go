@@ -108,11 +108,37 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !foundSession.Verified {
+		http.Error(w, "Session nonces not verified yet", http.StatusUnauthorized)
+		return
+	}
+
+	if err := foundSession.Signer.SetR(foundSession.Materials2); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to set aggregate R: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	foundSession.Signer.SetPartialSignature(foundSession.Message)
+	serverPartialSig := foundSession.Signer.GetPartialSignature()
+
+	serverSigAdded := false
+	for _, sig := range foundSession.PartialSignatures {
+		if sig.GetIndex() == serverPartialSig.GetIndex() {
+			serverSigAdded = true
+			break
+		}
+	}
+
+	if !serverSigAdded {
+		foundSession.PartialSignatures = append(foundSession.PartialSignatures, serverPartialSig)
+	}
+
 	expected := expectedSigningMaterialCount(foundSession)
+	fmt.Printf("expected: %d\nlen part sign: %d\n", expected, len(foundSession.PartialSignatures))
 
 	if len(foundSession.Materials1) != expected ||
 		len(foundSession.Materials2) != expected {
-		http.Error(w, "Not all material is present", http.StatusServiceUnavailable)
+		http.Error(w, "Not all material is present", http.StatusUnauthorized)
 		return
 	}
 
@@ -122,7 +148,7 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 			return cmp.Compare(a.GetIndex(), b.GetIndex())
 		})
 	} else {
-		http.Error(w, "Not all partial signatures recevied yet.", http.StatusServiceUnavailable)
+		http.Error(w, "Not all partial signatures received yet.", http.StatusUnauthorized)
 		return
 	}
 
@@ -134,7 +160,10 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 
 	expectedFriends := expectedSigningMaterialCount(foundSession) - 1
 
+	fmt.Printf("ret: %d\nexpf: %d\n", len(foundSession.RetrievedBy), expectedFriends)
+
 	if len(foundSession.RetrievedBy) >= expectedFriends {
+		fmt.Println("Deleted session")
 		delete(activeSignings, foundSession.WalletPubKeyHex)
 		log := fmt.Sprintf("SIGNATURE: %s retrieved the last signature. Session closed.", req.Username)
 		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, log)
@@ -242,9 +271,9 @@ func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slices.SortFunc(foundSession.Materials1, func(a, b crypto.MaterialToSend1) int {
-		return cmp.Compare(a.GetIndex(), b.GetIndex())
-	})
+	if !foundSession.Sorted {
+		sortMaterials(foundSession)
+	}
 
 	var resp_array []M1_dto
 	for _, item := range foundSession.Materials1 {
@@ -626,6 +655,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			Sorted:            false,
 			Verified:          false,
 			WalletPubKeyHex:   walletHex,
+			RetrievedBy:       make(map[string]bool),
 		}
 
 		activeSignings[walletHex] = signingSession
@@ -669,7 +699,6 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		Status:      "waiting",
 		Message:     "waiting for more participants",
 		JoinedCount: len(pending.Participants),
-		Threshold:   pending.Threshold,
 	})
 }
 

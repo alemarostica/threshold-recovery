@@ -487,6 +487,11 @@ func initializePartialSign(db *LocalDB) {
 			session.SetIndices(resp.VectorV)
 			session.SetIndexHash(resp.VectorV)
 
+			if err := ps.SetSession(session); err != nil {
+				fmt.Printf("Failed to set session in signer: %v\n", err)
+				return
+			}
+
 			var nonce crypto.NonceShare
 			if err := nonce.SetIndex(ps.GetParticipant().GetID()); err != nil {
 				fmt.Printf("Signing error: %v\n", err)
@@ -654,8 +659,6 @@ func initializePartialSign(db *LocalDB) {
 					return
 				}
 
-				fmt.Printf("m1: %v\nm2: %v\n", allM1[i], allM2[i])
-
 				ok, err := ps.VerifyNonce(&allM1[i], &allM2[i])
 				if err != nil {
 					fmt.Printf("Error verifying nonce for participant %d: %v\n", allM1[i].GetIndex(), err)
@@ -713,11 +716,15 @@ func initializePartialSign(db *LocalDB) {
 
 			var signResp api.GetPartialSignsResp
 
-			for err = callAPI("POST", "/sign/getSign", signedGetPartSignReq, &signResp); err != nil; {
-				fmt.Printf("Trying to fetch partial signatures...")
-				time.Sleep(3 * time.Second)
+			for range ticker.C {
+				if err := callAPI("POST", "/sign/getSign", signedGetPartSignReq, &signResp); err != nil {
+					fmt.Println("waiting for part signs...")
+					continue
+				} else {
+					break
+				}
 			}
-
+			
 			if err := ps.CombineSignature(signResp.PartialSignatures); err != nil {
 				fmt.Printf("Could not combine signatures: %v\n", err)
 				break
