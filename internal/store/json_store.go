@@ -75,6 +75,22 @@ func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey)
 	return s.save(w)
 }
 
+func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error {
+	w.ID = s.deriveID(w.PublicKey, userPubKey)
+
+	path := filepath.Join(s.DataDir, w.ID+".json")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("wallet does not exist")
+	}
+
+	// Delete
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to delete wallet file: %w", err)
+	}
+
+	return nil
+}
+
 // Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
 func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error {
 	w, err := s.GetWallet(pubKey, userPubKey)

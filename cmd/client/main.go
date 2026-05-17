@@ -24,7 +24,8 @@ import (
 	"time"
 
 	"filippo.io/edwards25519"
-	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/term"
 )
 
@@ -53,22 +54,28 @@ type Share struct {
 	WalletPub ed25519.PublicKey `json:"wallet_pub_key"`
 }
 
+type EncryptedDB struct {
+	Salt       []byte `json:"salt"`
+	Nonce      []byte `json:"nonce"`
+	Ciphertext []byte `json:"ciphertext"`
+}
+
 // Local storage models
 type LocalDB struct {
-	MyIdentity     *Identity           `json:"my_identity"`
-	Contacts       map[string]string   `json:"contacts"`
-	MyWallets      map[string]string   `json:"my_wallets"`
-	DirectoryEpoch uint64              `json:"directory_epoch"`
-	ServerPub      ed25519.PublicKey   `json:"server_pub"`
-	Alpha          edwards25519.Scalar `json:"alpha"`
-	ReceivedShares []Share             `json:"shares"`
+	MyIdentity     *Identity         `json:"my_identity"`
+	Contacts       map[string]string `json:"contacts"`
+	MyWallets      map[string]string `json:"my_wallets"`
+	DirectoryEpoch uint64            `json:"directory_epoch"`
+	ServerPub      ed25519.PublicKey `json:"server_pub"`
+	ReceivedShares []Share           `json:"shares"`
+	SessionKey     []byte            `json:"-"`
+	Salt           []byte            `json:"-"`
 }
 
 type Identity struct {
-	Name         string             `json:"name"`
-	PublicKey    ed25519.PublicKey  `json:"public_key"`
-	PrivateKey   ed25519.PrivateKey `json:"private_key"`
-	PasswordHash []byte             `json:"password_hash"`
+	Name       string             `json:"name"`
+	PublicKey  ed25519.PublicKey  `json:"public_key"`
+	PrivateKey ed25519.PrivateKey `json:"private_key"`
 }
 
 type ShareSender struct{}
@@ -116,17 +123,12 @@ func (cd *ClientDirectory) GetEpoch() uint64 {
 
 // Main
 func main() {
-	db := loadDB()
 	reader := bufio.NewReader(os.Stdin)
 
-	// First run
-	if db.MyIdentity == nil {
-		setupIdentity(reader, db)
-	} else {
-		if err := loginAndUnlock(db); err != nil {
-			fmt.Printf("Login failed: %v\n", err)
-			return
-		}
+	db, err := initDB(reader)
+	if err != nil {
+		fmt.Printf("Startup failed: %v\n", err)
+		return
 	}
 
 	dir := &ClientDirectory{
@@ -685,11 +687,15 @@ func initializePartialSign(db *LocalDB) {
 			}
 
 			zPart := ps.GetPartialSignature()
+			zScalar := zPart.GetZ()
 
 			partSignReq := api.SendPartialSign{
-				Username:         db.MyIdentity.Name,
-				SessionID:        session.GetID(),
-				PartialSignature: zPart,
+				Username:  db.MyIdentity.Name,
+				SessionID: session.GetID(),
+				PartialSignature: api.PartialSigMessage{
+					ParticipantID: zPart.GetIndex(),
+					Z:             zScalar.Bytes(),
+				},
 			}
 
 			partSignBytes, _ := json.Marshal(partSignReq)
@@ -724,14 +730,51 @@ func initializePartialSign(db *LocalDB) {
 					break
 				}
 			}
-			
-			if err := ps.CombineSignature(signResp.PartialSignatures); err != nil {
+
+			var finalPartials []crypto.PartialSignature
+			for _, pDto := range signResp.PartialSignatures {
+				var z crypto.Scalar
+				if _, err := z.SetCanonicalBytes(pDto.Z); err != nil {
+					fmt.Printf("Invalid Z scalar from server: %v\n", err)
+					return
+				}
+
+				var partSig crypto.PartialSignature
+				partSig.SetIndex(&pDto.ParticipantID)
+				partSig.SetZ(&z)
+				finalPartials = append(finalPartials, partSig)
+			}
+
+			if err := ps.CombineSignature(finalPartials); err != nil {
 				fmt.Printf("Could not combine signatures: %v\n", err)
 				break
 			}
 
-			// WE GOT IT MAYBE
+			// Brutely print it, should either save it or prettify it
 			fmt.Printf("Final signature: %v", ps.GetSignature())
+
+			bool, err := crypto.VerifySignature(*point, []byte("transaction to sign"), ps.GetSignature(), *session)
+			if err != nil {
+				fmt.Printf("Could not verify signature: %v\n", err)
+				return
+			}
+
+			if bool {
+				fmt.Println("Signature verified succesfully!")
+
+				// Zeroize share in db
+				// other function data should be handled by GC
+				if db.ReceivedShares[idx].Value != nil {
+					for i := range db.ReceivedShares[idx].Value {
+						db.ReceivedShares[idx].Value[i] = 0
+					}
+				}
+
+				db.ReceivedShares = append(db.ReceivedShares[:idx], db.ReceivedShares[idx+1:]...)
+				saveDB(db)
+			} else {
+				fmt.Println("Signature not verified.")
+			}
 
 			break
 		} else if resp.Status == "waiting" {
@@ -924,9 +967,81 @@ func createWallet(r *bufio.Reader, db *LocalDB) {
 	db.MyWallets[wHex] = walletName
 	saveDB(db)
 
+	// zeroize the secret
+	zero := make([]byte, 64)
+	secret.SetCanonicalBytes(zero)
+
 	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
 	fmt.Println("Handshakes succesfully initiated")
+}
+
+func deriveKey(password []byte, salt []byte) []byte {
+	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
+}
+
+func encryptDB(db *LocalDB) ([]byte, error) {
+	plaintext, err := json.Marshal(db)
+	if err != nil {
+		return nil, err
+	}
+
+	aead, err := chacha20poly1305.New(db.SessionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+
+	ciphertext := aead.Seal(nil, nonce, plaintext, nil)
+
+	env := EncryptedDB{
+		Salt:       db.Salt,
+		Nonce:      nonce,
+		Ciphertext: ciphertext,
+	}
+	return json.MarshalIndent(env, "", "  ")
+}
+
+func decryptDB(env *EncryptedDB, key []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.New(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Password is wrong or data is tampered
+	plaintext, err := aead.Open(nil, env.Nonce, env.Ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return plaintext, nil
+}
+
+func initDB(r *bufio.Reader) (*LocalDB, error) {
+	data, err := os.ReadFile(DBFile)
+
+	if os.IsNotExist(err) || len(data) == 0 {
+		db := &LocalDB{
+			Contacts:       make(map[string]string),
+			MyWallets:      make(map[string]string),
+			DirectoryEpoch: 0,
+		}
+		setupIdentity(r, db)
+		return db, nil
+	} else if err != nil {
+		return nil, err
+	}
+
+	var env EncryptedDB
+	if err := json.Unmarshal(data, &env); err != nil {
+		return nil, errors.New("failed to parse encrypted database format")
+	}
+
+	return loginAndUnlock(&env)
 }
 
 func setupIdentity(r *bufio.Reader, db *LocalDB) {
@@ -935,18 +1050,23 @@ Begin:
 	name := readInput(r)
 
 	fmt.Print("Choose password: ")
-	bytePassword, err := term.ReadPassword(syscall.Stdin)
+	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Println()
 	if err != nil {
 		fmt.Println("Something went wrong while reading password")
 		goto Begin
 	}
 
-	hash, err := bcrypt.GenerateFromPassword(bytePassword, bcrypt.DefaultCost)
-	if err != nil {
-		fmt.Printf("Failed to hash password: %v\n", err)
+	salt := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		fmt.Printf("Failed to generate salt: %v\n", err)
 		goto Begin
 	}
+
+	db.Salt = salt
+	db.SessionKey = deriveKey(bytePassword, salt)
+	
+	for i := range bytePassword { bytePassword[i] = 0 }
 
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -955,14 +1075,13 @@ Begin:
 	}
 
 	db.MyIdentity = &Identity{
-		Name:         name,
-		PublicKey:    pubKey,
-		PrivateKey:   privKey,
-		PasswordHash: hash,
+		Name:       name,
+		PublicKey:  pubKey,
+		PrivateKey: privKey,
 	}
 
-	fmt.Print("")
-
+	fmt.Print("Registering with server...\n")
+	
 	var resp api.RegisterParticipantResponse
 	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
 	if err := callAPI("POST", "/participants", req, &resp); err != nil {
@@ -972,31 +1091,43 @@ Begin:
 		goto Begin
 	}
 	db.ServerPub = resp.ServerPublicKey
-	db.Alpha = resp.Alpha
 
 	saveDB(db)
 }
 
-func loginAndUnlock(db *LocalDB) error {
-	fmt.Printf("Welcome back, %s!\n", db.MyIdentity.Name)
+func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
+	fmt.Println("Encrypted database found.")
 
 	for range 3 {
 		fmt.Printf("Enter password to login: ")
 		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Println()
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		// godo chacha20poly1305 é già constant time, ci preoccupiamo solo di dormire
 		start := time.Now()
-		targetDuration := 3 * time.Second
+		targetDuration := 2 * time.Second
 
-		err = bcrypt.CompareHashAndPassword(db.MyIdentity.PasswordHash, passwordBytes)
+		key := deriveKey(passwordBytes, env.Salt)
+
+		for i := range passwordBytes { passwordBytes[i] = 0 }
+
+		plaintext, err := decryptDB(env, key)
 
 		if err == nil {
-			fmt.Println("Database unlocked succesfully!")
-			return nil
+			var db LocalDB
+			if err := json.Unmarshal(plaintext, &db); err != nil {
+				return nil, errors.New("databae decrypted, but JSON is corrupted")
+			}
+
+			db.SessionKey = key
+			db.Salt = env.Salt
+			if db.MyWallets == nil { db.MyWallets = make(map[string]string) }
+			if db.Contacts == nil { db.Contacts = make(map[string]string) }
+
+			fmt.Printf("Welcome back, %s!\n", db.MyIdentity.Name)
+			return &db, nil
 		}
 
 		elapsed := time.Since(start)
@@ -1004,27 +1135,9 @@ func loginAndUnlock(db *LocalDB) error {
 			time.Sleep(targetDuration - elapsed)
 		}
 
-		fmt.Println("Incorrect password. Please try again.")
+		fmt.Println("Incorrect password or corrupt database. Please try again.")
 	}
-	return errors.New("maximum login attempts reached")
-}
-
-// Helpers
-func loadDB() *LocalDB {
-	db := &LocalDB{
-		Contacts:       make(map[string]string),
-		MyWallets:      make(map[string]string),
-		DirectoryEpoch: 0,
-	}
-	data, err := os.ReadFile(DBFile)
-	if err == nil {
-		json.Unmarshal(data, db)
-	}
-	// Check if file existed but lacked map
-	if db.MyWallets == nil {
-		db.MyWallets = make(map[string]string)
-	}
-	return db
+	return nil, errors.New("maximum login attempts reached")
 }
 
 // Menu functions
@@ -1044,15 +1157,20 @@ func printMenu(db *LocalDB) {
 func showIdentity(db *LocalDB) {
 	fmt.Println("\n--- Identity ---")
 	fmt.Printf("Username:   %s\n", db.MyIdentity.Name)
-	fmt.Printf("Public Key: %s\n", db.MyIdentity.PublicKey)
+	fmt.Printf("Public Key: %s\n", hex.EncodeToString(db.MyIdentity.PublicKey))
 	fmt.Println("\n(Send this public key to shareholder so they can add you")
 }
 
 func addContact(r *bufio.Reader, db *LocalDB) {
-	fmt.Print("Inserisci il nome (ID) dell'amico da aggiungere: ")
+	fmt.Print("Type ID of friend to add: ")
 	name := readInput(r)
+	if name == db.MyIdentity.Name {
+		fmt.Printf("You can't be friends with yourself! (...maybe?)")
+		return
+	}
+	
 	if name == "" {
-		fmt.Println("Il nome non puó essere vuoto.")
+		fmt.Println("Name can't be empty.")
 		return
 	}
 
@@ -1099,6 +1217,10 @@ func readInput(r *bufio.Reader) string {
 }
 
 func saveDB(db *LocalDB) {
-	data, _ := json.MarshalIndent(db, "", "  ")
-	os.WriteFile(DBFile, data, 0600)
+	encData, err := encryptDB(db)
+	if err != nil {
+		fmt.Printf("CRITICAL: Failed to encrypt database before saving: %v\n", err)
+		return
+	}
+	os.WriteFile(DBFile, encData, 0600)
 }

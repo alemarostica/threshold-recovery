@@ -4,8 +4,6 @@ import (
 	"crypto/ed25519"
 	"threshold-recovery/internal/crypto"
 	"time"
-
-	"filippo.io/edwards25519"
 )
 
 // Data Transfer Objects, everything coming from the outside world
@@ -65,7 +63,6 @@ type RegisterParticipantRequest struct {
 
 type RegisterParticipantResponse struct {
 	ServerPublicKey ed25519.PublicKey   `json:"server_public_key"`
-	Alpha           edwards25519.Scalar `json:"alpha"`
 }
 
 type ParticipantResponse struct {
@@ -155,9 +152,9 @@ type GetM2Response struct {
 }
 
 type SendPartialSign struct {
-	Username         string                  `json:"username"`
-	SessionID        []byte                  `json:"session_id"`
-	PartialSignature crypto.PartialSignature `json:"partial_signature"`
+	Username         string            `json:"username"`
+	SessionID        []byte            `json:"session_id"`
+	PartialSignature PartialSigMessage `json:"partial_signature"`
 }
 
 type GetPartialSigns struct {
@@ -166,7 +163,7 @@ type GetPartialSigns struct {
 }
 
 type GetPartialSignsResp struct {
-	PartialSignatures []crypto.PartialSignature `json:"partial_signatures"`
+	PartialSignatures []PartialSigMessage `json:"partial_signatures"`
 }
 
 type SignedSignInitRequest struct {

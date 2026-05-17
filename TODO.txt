@@ -1,3 +1,4 @@
-- Check se la roba con HMAC è fatta bene o ho fatto una porcata
-- Mutual TLS o solo del server?
-- Mutex nel json_store?
+- Argon2 su client e relazione
+- Handle errori dei Setter
+- Print details about operations
+- Commentare

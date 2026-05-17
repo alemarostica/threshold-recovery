@@ -422,7 +422,7 @@ func (ps *ParticipantSigner) SetLagrangeCoefficient() error {
 			ScalarPow(&alpha, uint8(id-1), &aus2)
 			aus3.Set(&One)
 			ScalarPow(&alpha, uint8(ps.p.id-1), &aus3)
-			aus3.Subtract(&aus3, &aus2) // aus3 = alpha^{id-1} - alpha^{p.id-1}
+			aus3.Subtract(&aus2, &aus3) // aus3 = alpha^{id-1} - alpha^{p.id-1}
 			aus3.Invert(&aus3)          // aus3 = 1/(alpha^{id-1} - alpha^{p.id-1})
 			aus2.Multiply(&aus2, &aus3) // aus2 = alpha^{id-1} / (alpha^{id-1} - alpha^{p.id-1})
 			term.Multiply(&term, &aus2)

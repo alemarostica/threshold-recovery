@@ -17,6 +17,7 @@ const (
 	EventSignSuccess             AuditEvent = "SIGN_SUCCESS"
 	EventSignBlocked             AuditEvent = "SIGN_BLOCKED_ACTIVE"
 	EventSignThreshold           AuditEvent = "SIGN_THRESH_REACHED"
+	EventSignFail                AuditEvent = "SIGN_COMB_FAIL"
 	EventSignatureRetrive        AuditEvent = "SIGN_RETRIEVE"
 	EventParticipantRegisterFail AuditEvent = "PART_REG_FAILURE"
 	EventParticipantRegister     AuditEvent = "PART_REG"

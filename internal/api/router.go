@@ -37,26 +37,24 @@ type WalletService interface {
 	DeriveFriendSlot(walletPubKey, friendPubKey []byte) string
 	SaveParticipant(p *core.Participant) error
 	GetParticipant(id string) (*core.Participant, uint64, error)
+	DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error
 }
 
 type Handler struct {
 	Service WalletService
 	Audit   core.AuditLogger
 	PrivKey ed25519.PrivateKey
-	Alpha   *edwards25519.Scalar
 }
 
 func NewHandler(
 	s WalletService,
 	a core.AuditLogger,
 	privKey ed25519.PrivateKey,
-	alpha *edwards25519.Scalar,
 ) *Handler {
 	return &Handler{
 		Service: s,
 		Audit:   a,
 		PrivKey: privKey,
-		Alpha:   alpha,
 	}
 }
 
@@ -134,7 +132,6 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expected := expectedSigningMaterialCount(foundSession)
-	fmt.Printf("expected: %d\nlen part sign: %d\n", expected, len(foundSession.PartialSignatures))
 
 	if len(foundSession.Materials1) != expected ||
 		len(foundSession.Materials2) != expected {
@@ -152,28 +149,85 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var dtoSignatures []PartialSigMessage
+	for _, sig := range foundSession.PartialSignatures {
+		zScalar := sig.GetZ()
+		dtoSignatures = append(dtoSignatures, PartialSigMessage{
+			ParticipantID: sig.GetIndex(),
+			Z:             zScalar.Bytes(),
+		})
+	}
+
 	resp := &GetPartialSignsResp{
-		PartialSignatures: foundSession.PartialSignatures,
+		PartialSignatures: dtoSignatures,
 	}
 
 	foundSession.RetrievedBy[req.Username] = true
 
 	expectedFriends := expectedSigningMaterialCount(foundSession) - 1
 
-	fmt.Printf("ret: %d\nexpf: %d\n", len(foundSession.RetrievedBy), expectedFriends)
-
 	if len(foundSession.RetrievedBy) >= expectedFriends {
-		fmt.Println("Deleted session")
+		// Everybody retrieved the partial signatures
+		// Combine signatures also on server side
+		// Useless but doing it just as a demo
+
+		if err := foundSession.Signer.CombineSignature(foundSession.PartialSignatures); err != nil {
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Failure combining signature.")
+		}
+
+		bool, err := crypto.VerifySignature(foundSession.Signer.P, foundSession.Message, foundSession.Signer.GetSignature(), foundSession.Signer.GetSession())
+		if err != nil {
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Could not verify signature.")
+		}
+
+		if bool {
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, "Successfully verified signature!")
+		} else {
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Signature did not verify.")
+		}
+
+		// Delete wallet 
+		walletOwner, _, err := h.Service.GetParticipant(foundSession.WalletOwner)
+		if err != nil {
+			h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Could not find wallet owner to delete wallet")
+		} else {
+			walletPubKey, _ := hex.DecodeString(foundSession.WalletPubKeyHex)
+
+			wallet, err := h.Service.GetWallet(walletPubKey, walletOwner.PublicKey)
+
+			if err != nil || wallet == nil {
+				h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Failed to load wallet for deletion from persistent storage")
+			} else {
+				if err := h.Service.DeleteWallet(wallet, walletOwner.PublicKey); err != nil {
+					h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignFail, "Failed to remove wallet from persistent storage")
+				} else {
+					h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, "Successfully deleted wallet")
+				}
+
+				// Zeroize sensitive fields
+				if wallet.ServerShare != nil {
+					for i := range wallet.ServerShare {
+						wallet.ServerShare[i] = 0
+					}
+				}
+				if wallet.Commitments != nil {
+					for i := range wallet.Commitments {
+						for j := range wallet.Commitments[i] {
+							wallet.Commitments[i][j] = 0
+						}
+					}
+				}
+			}
+		}
+
 		delete(activeSignings, foundSession.WalletPubKeyHex)
-		log := fmt.Sprintf("SIGNATURE: %s retrieved the last signature. Session closed.", req.Username)
+		log := fmt.Sprintf("%s retrieved the last signature. Session closed.", req.Username)
 		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, log)
 	} else {
-		log := fmt.Sprintf("SIGNAUTRE: %s retrieved signature (%d/%d)", req.Username, len(foundSession.RetrievedBy), expectedFriends)
+		log := fmt.Sprintf("%s retrieved signature (%d/%d)", req.Username, len(foundSession.RetrievedBy), expectedFriends)
 		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignatureRetrive, log)
 	}
 
-	log := fmt.Sprintf("SIGNATURE: %s tried to retrieve signature\n", "USERNAME_PLACEHOLDER")
-	h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignatureRetrive, log)
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -211,7 +265,7 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idx := req.PartialSignature.GetIndex()
+	idx := req.PartialSignature.ParticipantID
 	sess := foundSession.Signer.GetSession()
 
 	if idx == crypto.ServerID {
@@ -230,7 +284,17 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	foundSession.PartialSignatures = append(foundSession.PartialSignatures, req.PartialSignature)
+	var z crypto.Scalar
+	if _, err := z.SetCanonicalBytes(req.PartialSignature.Z); err != nil {
+		http.Error(w, "Invalid Z scalar encoding", http.StatusBadRequest)
+		return
+	}
+
+	var partSign crypto.PartialSignature
+	partSign.SetIndex(&idx)
+	partSign.SetZ(&z)
+
+	foundSession.PartialSignatures = append(foundSession.PartialSignatures, partSign)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -655,6 +719,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			Sorted:            false,
 			Verified:          false,
 			WalletPubKeyHex:   walletHex,
+			WalletOwner:       req.WalletUsername,
 			RetrievedBy:       make(map[string]bool),
 		}
 
@@ -882,7 +947,6 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 
 	resp := RegisterParticipantResponse{
 		ServerPublicKey: serverPubKey,
-		Alpha:           *h.Alpha,
 	}
 
 	h.Audit.Log(req.ID, core.EventParticipantRegister, "Participant registered succesfully")

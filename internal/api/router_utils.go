@@ -26,6 +26,7 @@ type SigningSession struct {
 	Verified          bool
 	Signature         crypto.Signature
 	WalletPubKeyHex   string
+	WalletOwner       string
 	RetrievedBy       map[string]bool
 }
 
