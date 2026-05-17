@@ -913,7 +913,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.Audit.Log(string(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
+	h.Audit.Log(hex.EncodeToString(req.PublicKey), core.EventLiveness, "Liveness updated via signed timestamp")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"liveness_updated"}`))
 }

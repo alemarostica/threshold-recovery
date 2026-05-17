@@ -1,4 +1,3 @@
-- Argon2 su client e relazione
 - Handle errori dei Setter
 - Print details about operations
 - Commentare
