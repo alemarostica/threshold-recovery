@@ -140,9 +140,6 @@ func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, er
 	var rhs Point
 	rhs.Add(&sig.R, &eP)
 
-	fmt.Printf("zG:  %x\n", zG.Bytes())
-	fmt.Printf("rhs: %x\n", rhs.Bytes())
-	fmt.Println("equal:", zG.Equal(&rhs) == 1)
 	// Final check
 	return zG.Equal(&rhs) == 1, nil
 }
