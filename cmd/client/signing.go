@@ -353,7 +353,7 @@ func InitializePartialSign(db *LocalDB) {
 			}
 
 			// Brutely print it, should either save it or prettify it
-			fmt.Printf("Final signature: %v", ps.GetSignature())
+			fmt.Printf("Final signature: %v\n", ps.GetSignature())
 
 			bool, err := crypto.VerifySignature(*point, []byte("transaction to sign"), ps.GetSignature(), *session)
 			if err != nil {

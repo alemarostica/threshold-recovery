@@ -1,3 +1,2 @@
 - Handle errori dei Setter
-- Print details about operations
 - Commentare

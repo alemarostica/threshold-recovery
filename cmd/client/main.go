@@ -241,7 +241,7 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			}
 
 			// We received the share
-			fmt.Printf("Succesfully received share from %s.", msg.From)
+			fmt.Printf("\nSuccesfully received share from %s.", msg.From)
 
 			// Temporary print
 			os.WriteFile("test.bin", plaintextMessage, 0644)
