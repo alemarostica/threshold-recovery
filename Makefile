@@ -3,7 +3,7 @@ CLIENT_DIR=$(ROOT_DIR)/client_dir
 SERVER_BINARY_NAME=$(ROOT_DIR)/server
 CLIENT_BINARY_NAME=$(CLIENT_DIR)/client
 SERVER_SOURCE=./cmd/server/main.go
-CLIENT_SOURCE_DIR=./cmd/client
+CLIENT_SOURCE=./cmd/client
 CERT_DIR=./certs
 SERVER_CRT=$(CERT_DIR)/server.crt
 SERVER_KEY=$(CERT_DIR)/server.key
@@ -32,7 +32,7 @@ run-server: prepare-deps $(SERVER_CRT)
 
 build-client: prepare-deps $(SERVER_CRT)
 	@echo "Building the client..."
-	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE_DIR)
+	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE)
 	mkdir $(CLIENT_DIR)/1 $(CLIENT_DIR)/2 $(CLIENT_DIR)/3
 
 clean:
