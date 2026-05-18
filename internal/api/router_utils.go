@@ -30,7 +30,7 @@ type SigningSession struct {
 	RetrievedBy       map[string]bool
 }
 
-// is it necessary?
+// Sort slices of MaterialToSend{1,2}
 func sortMaterials(session *SigningSession) {
 	slices.SortFunc(session.Materials1, func(a, b crypto.MaterialToSend1) int {
 		return cmp.Compare(a.GetIndex(), b.GetIndex())
@@ -43,6 +43,7 @@ func sortMaterials(session *SigningSession) {
 	session.Sorted = true
 }
 
+// Utility to verify received nonces in a session
 func verifyNonces(session *SigningSession) error {
 	for i := range len(session.Materials1) {
 		if i == 0 {
@@ -65,6 +66,7 @@ func verifyNonces(session *SigningSession) error {
 	return nil
 }
 
+// utility that allows to find a session by its ID
 func findSigningSessionByID(sessionID []byte) (*SigningSession, bool) {
 	for _, signingSession := range activeSignings {
 		session := signingSession.Signer.GetSession()
@@ -75,6 +77,7 @@ func findSigningSessionByID(sessionID []byte) (*SigningSession, bool) {
 	return nil, false
 }
 
+// Id equivalent to returning the number of signing participants
 func expectedSigningMaterialCount(s *SigningSession) int {
 	return len(s.Signer.GetIndices()) + 1 // participants + server
 }

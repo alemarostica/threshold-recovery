@@ -24,6 +24,7 @@ import (
 	"golang.org/x/term"
 )
 
+// util function to call a generic endpoint on the server
 func callAPI(method, path string, payload any, out any) error {
 	var body io.Reader
 	if payload != nil {
@@ -77,10 +78,14 @@ func callAPI(method, path string, payload any, out any) error {
 	return nil
 }
 
+// Use Argon2id to derive an encryption key from password
+// of course, password has to be decently strong
 func deriveKey(password []byte, salt []byte) []byte {
-	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
+	// OWASP suggests 3 iterations, 256MiB of memory, threads and 32 bytes of output length
+	return argon2.IDKey(password, salt, 3, 256*1024, 4, 32)
 }
 
+// Take the in-memory DB and encrypt it with a argon2 derived key
 func encryptDB(db *LocalDB) ([]byte, error) {
 	plaintext, err := json.Marshal(db)
 	if err != nil {
@@ -107,6 +112,7 @@ func encryptDB(db *LocalDB) ([]byte, error) {
 	return json.MarshalIndent(env, "", "  ")
 }
 
+// decrypt stored DB with argon2 derived key
 func decryptDB(env *EncryptedDB, key []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
@@ -122,6 +128,8 @@ func decryptDB(env *EncryptedDB, key []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// Initialize the db
+// Either create one or load it from memory
 func InitDB(r *bufio.Reader) (*LocalDB, error) {
 	data, err := os.ReadFile(DBFile)
 
@@ -145,6 +153,7 @@ func InitDB(r *bufio.Reader) (*LocalDB, error) {
 	return loginAndUnlock(&env)
 }
 
+// Create the account of the user
 func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 	for {
 		fmt.Print("Choose username: ")
@@ -201,6 +210,7 @@ func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 	}
 }
 
+// Login function, tries to decrypt db with password, if present
 func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 	fmt.Println("Encrypted database found.")
 
@@ -271,6 +281,7 @@ func ShowIdentity(db *LocalDB) {
 	fmt.Printf("Public Key: %s\n", hex.EncodeToString(db.MyIdentity.PublicKey))
 }
 
+// Add a friend to be able to send them shares
 func AddContact(r *bufio.Reader, db *LocalDB) {
 	fmt.Print("Type ID of friend to add: ")
 	name := ReadInput(r)
@@ -321,11 +332,13 @@ func ListCreatedWallets(db *LocalDB) {
 	}
 }
 
+// Utility to read form stdin
 func ReadInput(r *bufio.Reader) string {
 	input, _ := r.ReadString('\n')
 	return strings.TrimSpace(input)
 }
 
+// Utility to update DB at any time
 func SaveDB(db *LocalDB) {
 	encData, err := encryptDB(db)
 	if err != nil {

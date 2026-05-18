@@ -7,6 +7,8 @@ import (
 )
 
 // Data Transfer Objects, everything coming from the outside world
+// Most requests by the client are signed with their private key
+// so most DTOs have a wrapper containing the signature of the message
 
 type FriendShareInput struct {
 	FriendPubKey  []byte `json:"friend_public_key"`

@@ -15,6 +15,7 @@ import (
 	"time"
 )
 
+// When a user wants to initialize signature recovery this function is called
 func InitializePartialSign(db *LocalDB) {
 	if len(db.ReceivedShares) == 0 {
 		fmt.Println("No shares found in local database.")
@@ -38,6 +39,7 @@ func InitializePartialSign(db *LocalDB) {
 
 	fmt.Println("Checking wallet status and joining recovery pool on server...")
 
+	// This request will be sent until the thresold has been reached on the server
 	initReq := api.SignInitRequest{
 		Requester:      db.MyIdentity.Name,
 		WalletPubKey:   selected.WalletPub,
@@ -60,6 +62,7 @@ func InitializePartialSign(db *LocalDB) {
 			return
 		}
 
+		// Server will respond with a different status based on whether the treshold has been reached or not
 		if resp.Status == "ready" {
 			fmt.Printf("\nThreshold reached, server confirmed session\n")
 
@@ -68,6 +71,7 @@ func InitializePartialSign(db *LocalDB) {
 			part.SetID(crypto.ParticipantID(selected.Index))
 			part.SetName(selected.Username)
 
+			// All paramaters for the signing session are set
 			var shareScalar crypto.Scalar
 			if _, err := shareScalar.SetCanonicalBytes(selected.Value); err != nil {
 				fmt.Printf("Failed to load share scalar: %v\n", err)
@@ -128,6 +132,7 @@ func InitializePartialSign(db *LocalDB) {
 
 			ps.SetMaterialToSend1(m1)
 
+			// Client sends its MaterialToSend1
 			setM1Req := api.SetM1Request{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -158,6 +163,7 @@ func InitializePartialSign(db *LocalDB) {
 
 			ps.SetMaterialToSend2(m2)
 
+			// Client now retrieves the full arrays of MaterialsToSend1 of all participants
 			getM1Req := api.GetM1Request{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -193,6 +199,7 @@ func InitializePartialSign(db *LocalDB) {
 				return cmp.Compare(a.GetIndex(), b.GetIndex())
 			})
 
+			// Client sets MaterialToSend2 on server
 			RiPoint := m2.GetRi()
 			setM2Req := api.SetM2Request{
 				Username:  db.MyIdentity.Name,
@@ -223,6 +230,7 @@ func InitializePartialSign(db *LocalDB) {
 				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, getM2Bytes),
 			}
 
+			// Client now retrieves the full arrays of MaterialsToSend2 of all participants
 			var allM2resp api.GetM2Response
 			for range ticker.C {
 				if err := callAPI("POST", "/sign/getm2", signedGetM2Req, &allM2resp); err != nil {
@@ -251,7 +259,7 @@ func InitializePartialSign(db *LocalDB) {
 				return cmp.Compare(a.GetIndex(), b.GetIndex())
 			})
 
-			// trigger verify nonce
+			// Trigger verify of Materials received
 			if len(allM1) != len(allM2) {
 				fmt.Println("Haven't received the same number of M1s and M2s.")
 				continue
@@ -281,9 +289,10 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
-			// placeholder message, in a real application this would need to be established
+			// placeholder message, in a real application this would need to be agreed upon
 			msg := []byte("transaction to sign")
 
+			// Partial signature is created from the share and setn to server
 			if err := ps.SetPartialSignature(msg); err != nil {
 				fmt.Printf("Could not create partial signature: %v\n", err)
 				break
@@ -312,6 +321,7 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
+			// Client retrieves and combines all partial signatures
 			getPartSignReq := api.GetPartialSigns{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),

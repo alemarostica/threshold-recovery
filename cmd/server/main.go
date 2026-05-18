@@ -72,7 +72,6 @@ func main() {
 		}
 	}
 
-	// TODO: bruh decidere se inviarla o hardcodarla
 	log.Printf("Server pubKey: %s", hex.EncodeToString(serverPub))
 
 	// Logic and API
@@ -97,7 +96,6 @@ func main() {
 		port = ":" + port
 	}
 
-	// TODO: to change with ListenAndServeTLS
 	// As soon as ListenAndServe returns some error we exit and log a fatal error
 	if err := http.ListenAndServeTLS(port, certFile, keyFile, mux); err != nil {
 		log.Fatal(err)

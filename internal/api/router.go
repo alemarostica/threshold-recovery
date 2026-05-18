@@ -20,9 +20,11 @@ import (
 )
 
 var (
+	// Inboxes for clients to send keyexchange messages into
 	inbox      = make(map[string][]keyexchange.Message)
 	inboxMutex sync.RWMutex
 
+	// signing sessions
 	activeSignings  = make(map[string]*SigningSession)
 	pendingSignings = make(map[string]*PendingSign)
 	signMu          sync.Mutex
@@ -41,6 +43,7 @@ type WalletService interface {
 	DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error
 }
 
+// Contains server side services, auditing and private key
 type Handler struct {
 	Service WalletService
 	Audit   core.AuditLogger
@@ -77,6 +80,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /sign/getSign", h.handleGetSign)
 }
 
+// Last function of signing process, everything has been sent by clients
+// and data partial signatures need to be retrieved
 func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedGetPartialSigns
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -101,12 +106,14 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	signMu.Lock()
 	defer signMu.Unlock()
 
+	// Does the session exist?
 	foundSession, ok := findSigningSessionByID(req.SessionID)
 	if !ok {
 		http.Error(w, "A session with such ID does not exist", http.StatusNotFound)
 		return
 	}
 
+	// Check if the nonces have been verified
 	if !foundSession.Verified {
 		http.Error(w, "Session nonces not verified yet", http.StatusUnauthorized)
 		return
@@ -117,6 +124,7 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Make the server's partial signature and add it
 	foundSession.Signer.SetPartialSignature(foundSession.Message)
 	serverPartialSig := foundSession.Signer.GetPartialSignature()
 
@@ -134,6 +142,7 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 
 	expected := expectedSigningMaterialCount(foundSession)
 
+	// Check if all necessary data has been submitted by clients
 	if len(foundSession.Materials1) != expected ||
 		len(foundSession.Materials2) != expected {
 		http.Error(w, "Not all material is present", http.StatusUnauthorized)
@@ -221,6 +230,7 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Delete session
 		delete(activeSignings, foundSession.WalletPubKeyHex)
 		log := fmt.Sprintf("%s retrieved the last signature. Session closed.", req.Username)
 		h.Audit.Log(foundSession.WalletPubKeyHex, core.EventSignSuccess, log)
@@ -232,6 +242,7 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Clients ask to submit their partial signature
 func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedSendPartialSign
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -268,7 +279,7 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 
 	idx := req.PartialSignature.ParticipantID
 	sess := foundSession.Signer.GetSession()
-
+	
 	if idx == crypto.ServerID {
 		http.Error(w, "server partial signature is managed internally", http.StatusForbidden)
 		return
@@ -300,6 +311,7 @@ func (h *Handler) handleSendPart(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// Client asked to retrieve MaterialToSend1 slice
 func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedGetM1Request
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -354,6 +366,7 @@ func (h *Handler) handleGetM1(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Clients asked to retrive
 func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedGetM2Request
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -420,6 +433,7 @@ func (h *Handler) handleGetM2(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Client asked ot submit MaterialToSend1
 func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedSetM1Request
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -479,6 +493,7 @@ func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// Client asked to submit MaterialToSend2
 func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedSetM2Request
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -543,6 +558,7 @@ func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// Client asked to initialize a signing session
 func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	var signedReq SignedSignInitRequest
 	if err := json.NewDecoder(r.Body).Decode(&signedReq); err != nil {
@@ -572,6 +588,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if the wallet is recoverable, otherwise deny the request
 	if !wallet.IsRecoverable() {
 		h.Audit.Log(hex.EncodeToString(req.WalletPubKey), core.EventSignBlocked, "Attempted to sign before expiration.")
 		w.Header().Set("Content-Type", "application/json")
@@ -588,6 +605,8 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 
 	walletHex := hex.EncodeToString(req.WalletPubKey)
 
+	// If a signing session is already active adn threshold
+	// has been reached return it to the client
 	if signingSession, active := activeSignings[walletHex]; active {
 		session := signingSession.Signer.GetSession()
 		vectorV := session.GetIndices()
@@ -604,7 +623,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// has session been formed?
+	// has pending session been formed?
 	pending, exists := pendingSignings[walletHex]
 	if !exists {
 		pending = &PendingSign{
@@ -630,10 +649,11 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		pending.Usernames = append(pending.Usernames, req.WalletUsername)
 	}
 
-	// hit threshold?
+	// hit threshold? create a signing session
 	if len(pending.Participants) >= pending.Threshold {
 		session := &crypto.Session{}
 
+		// Signing session parameters are set
 		indices := append([]crypto.ParticipantID(nil), pending.Participants...)
 		slices.Sort(indices)
 
@@ -711,6 +731,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		m2.SetRi(*Ri)
 		ss.SetMaterialToSend2(m2)
 
+		// Create session instance
 		signingSession := &SigningSession{
 			Signer:            ss,
 			Materials1:        []crypto.MaterialToSend1{m1},
@@ -754,6 +775,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	} else {
+		// The session is active, but not enough participants showed up yet
 		resp := &SignInitResponse{
 			Status:  "waiting",
 			Message: "waiting for participants",
@@ -768,6 +790,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Clients asked to forward a message into the inbox
 func (h *Handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	var msg keyexchange.Message
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
@@ -801,6 +824,7 @@ func (h *Handler) handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(msgs)
 }
 
+// Client asked to register a new wallet
 func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024) // 1MB limit, protects against DoS
 
@@ -862,7 +886,7 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 		LastActivity:        time.Now(),
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold
-		// TODO: change if necessary
+		// Can be changed to have a specific date
 		ExpirationDate:  time.Now().Add(req.InactivityThreshold),
 		ThresholdParams: req.PubParams,
 		P:               req.P,
@@ -883,6 +907,7 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"registered"}`))
 }
 
+// Client asked to update the liveness of a wallet
 func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	// Decode the request
 	var signedReq SignedLivenessRequest
@@ -919,6 +944,7 @@ func (h *Handler) handleLiveness(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"liveness_updated"}`))
 }
 
+// A new user registration request was received
 func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterParticipantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -957,6 +983,7 @@ func (h *Handler) handleParticipantRegister(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Client has requested a participant's public key
 func (h *Handler) handleGetParticipants(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {

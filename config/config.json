@@ -2,4 +2,5 @@
     "server_port": "8443",
     "data_dir": "./data",
     "default_timeout_hours": 720
+    "hmac_secret": "cotoletta"
 }
