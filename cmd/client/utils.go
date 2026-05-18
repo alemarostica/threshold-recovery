@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 	"threshold-recovery/internal/api"
@@ -145,54 +146,59 @@ func InitDB(r *bufio.Reader) (*LocalDB, error) {
 }
 
 func SetupIdentity(r *bufio.Reader, db *LocalDB) {
-Begin:
-	fmt.Print("Choose username: ")
-	name := ReadInput(r)
+	for {
+		fmt.Print("Choose username: ")
+		name := ReadInput(r)
 
-	fmt.Print("Choose password: ")
-	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
-	if err != nil {
-		fmt.Println("Something went wrong while reading password")
-		goto Begin
+		fmt.Printf("Choose password: ")
+		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Println("Something went wrong while reading password. Please try again.")
+			continue
+		}
+
+		salt := make([]byte, 16)
+		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+			fmt.Printf("Failed to generate salt: %v\n", err)
+			continue
+		}
+
+		pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			fmt.Printf("Failed to generate identity keys: %v\n", err)
+			continue
+		}
+
+		fmt.Print("Registering with server...")
+
+		var resp api.RegisterParticipantResponse
+		req := api.RegisterParticipantRequest{
+			ID: name, PublicKey: pubKey,
+		}
+		if err := callAPI("POST", "/participants", req, &resp); err != nil {
+			fmt.Printf("Server registration failed: %v\n", err)
+			clear(bytePassword)
+			runtime.KeepAlive(bytePassword)
+			continue
+		}
+
+		db.Salt = salt
+		db.SessionKey = deriveKey(bytePassword, salt)
+		clear(bytePassword)
+		runtime.KeepAlive(bytePassword)
+
+		db.MyIdentity = &Identity{
+			Name:       name,
+			PublicKey:  pubKey,
+			PrivateKey: privKey,
+		}
+		db.ServerPub = resp.ServerPublicKey
+
+		SaveDB(db)
+
+		return
 	}
-
-	salt := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		fmt.Printf("Failed to generate salt: %v\n", err)
-		goto Begin
-	}
-
-	db.Salt = salt
-	db.SessionKey = deriveKey(bytePassword, salt)
-	
-	for i := range bytePassword { bytePassword[i] = 0 }
-
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		fmt.Printf("Failed to generate identity keys: %v\n", err)
-		goto Begin
-	}
-
-	db.MyIdentity = &Identity{
-		Name:       name,
-		PublicKey:  pubKey,
-		PrivateKey: privKey,
-	}
-
-	fmt.Print("Registering with server...\n")
-	
-	var resp api.RegisterParticipantResponse
-	req := api.RegisterParticipantRequest{ID: name, PublicKey: pubKey}
-	if err := callAPI("POST", "/participants", req, &resp); err != nil {
-		fmt.Printf("Server registration failed: %v\n", err)
-		// goto jumpscare
-		// Però dai, nel kernel di Linux lo usano in questa maniera quindi ci sta
-		goto Begin
-	}
-	db.ServerPub = resp.ServerPublicKey
-
-	SaveDB(db)
 }
 
 func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
@@ -211,7 +217,8 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 
 		key := deriveKey(passwordBytes, env.Salt)
 
-		for i := range passwordBytes { passwordBytes[i] = 0 }
+		clear(passwordBytes)
+		runtime.KeepAlive(passwordBytes)
 
 		plaintext, err := decryptDB(env, key)
 
@@ -223,8 +230,12 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 
 			db.SessionKey = key
 			db.Salt = env.Salt
-			if db.MyWallets == nil { db.MyWallets = make(map[string]string) }
-			if db.Contacts == nil { db.Contacts = make(map[string]string) }
+			if db.MyWallets == nil {
+				db.MyWallets = make(map[string]string)
+			}
+			if db.Contacts == nil {
+				db.Contacts = make(map[string]string)
+			}
 
 			fmt.Printf("Welcome back, %s!\n", db.MyIdentity.Name)
 			return &db, nil
@@ -267,7 +278,7 @@ func AddContact(r *bufio.Reader, db *LocalDB) {
 		fmt.Printf("You can't be friends with yourself! (...maybe?)")
 		return
 	}
-	
+
 	if name == "" {
 		fmt.Println("Name can't be empty.")
 		return

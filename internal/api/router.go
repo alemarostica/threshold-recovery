@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
 	"slices"
 	"sync"
 	"threshold-recovery/internal/core"
@@ -206,16 +207,16 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 
 				// Zeroize sensitive fields
 				if wallet.ServerShare != nil {
-					for i := range wallet.ServerShare {
-						wallet.ServerShare[i] = 0
-					}
+					clear(wallet.ServerShare)
+					runtime.KeepAlive(wallet.ServerShare)
 				}
 				if wallet.Commitments != nil {
 					for i := range wallet.Commitments {
-						for j := range wallet.Commitments[i] {
-							wallet.Commitments[i][j] = 0
-						}
+						clear(wallet.Commitments[i])
+						runtime.KeepAlive(wallet.Commitments[i])
 					}
+					clear(wallet.Commitments)
+					runtime.KeepAlive(wallet.Commitments)
 				}
 			}
 		}

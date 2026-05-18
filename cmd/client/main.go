@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"threshold-recovery/internal/api"
@@ -515,9 +516,9 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	SaveDB(db)
 
 	// zeroize the secret
-	zero := make([]byte, 64)
-	secret.SetCanonicalBytes(zero)
-
+	secret = crypto.Scalar{}
+	runtime.KeepAlive(&secret)
+	
 	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
 	fmt.Println("Handshakes succesfully initiated")

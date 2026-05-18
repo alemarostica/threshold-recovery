@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"threshold-recovery/internal/api"
@@ -367,9 +368,8 @@ func InitializePartialSign(db *LocalDB) {
 				// Zeroize share in db
 				// other function data should be handled by GC
 				if db.ReceivedShares[idx].Value != nil {
-					for i := range db.ReceivedShares[idx].Value {
-						db.ReceivedShares[idx].Value[i] = 0
-					}
+					clear(db.ReceivedShares[idx].Value)
+					runtime.KeepAlive(db.ReceivedShares)
 				}
 
 				db.ReceivedShares = append(db.ReceivedShares[:idx], db.ReceivedShares[idx+1:]...)
