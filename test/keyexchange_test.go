@@ -2,102 +2,24 @@ package test
 
 import (
 	"bytes"
-	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/hkdf"
 	"crypto/rand"
-	"crypto/sha256"
 	"errors"
 	"testing"
 
 	"threshold-recovery/internal/keyexchange"
-
-	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// Interface implementation.
-
-type RealCrypto struct{}
-
-func (r RealCrypto) GenerateEphemeralDH() ([]byte, []byte, error) {
-	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, nil, err
-	}
-	return priv.Bytes(), priv.PublicKey().Bytes(), nil
-}
-
-func (r RealCrypto) ComputeSharedSecret(priv, peerPub []byte) ([]byte, error) {
-	p, err := ecdh.X25519().NewPrivateKey(priv)
-	if err != nil {
-		return nil, errors.New("invalid private key bytes")
-	}
-
-	pub, err := ecdh.X25519().NewPublicKey(peerPub)
-	if err != nil {
-		return nil, errors.New("invalid peer public key")
-	}
-
-	return p.ECDH(pub)
-}
-
-func (r RealCrypto) Sign(priv []byte, msg []byte) ([]byte, error) {
-	if len(priv) != ed25519.PrivateKeySize {
-		return nil, errors.New("invalid ed25519 private key size")
-	}
-	return ed25519.Sign(priv, msg), nil
-}
-
-func (r RealCrypto) Verify(pub, msg, sig []byte) bool {
-	if len(pub) != ed25519.PublicKeySize {
-		return false
-	}
-	return ed25519.Verify(pub, msg, sig)
-}
-
-func (r RealCrypto) Hash(data []byte) []byte {
-	h := sha256.Sum256(data)
-	return h[:]
-}
-
-func (r RealCrypto) RandomNonce() []byte {
-	out := make([]byte, 32)
-	rand.Read(out)
-	return out
-}
-
-func (r RealCrypto) DeriveKey(shared, transcript []byte) ([]byte, error) {
-	return hkdf.Key(sha256.New, shared, transcript, "share-transfer-v1", 32)
-}
-
-func (r RealCrypto) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	nonce := make([]byte, aead.NonceSize())
-	rand.Read(nonce)
-
-	ciphertext := aead.Seal(nil, nonce, plaintext, aad)
-	return ciphertext, nonce, nil
-}
-
-func (r RealCrypto) Decrypt(key, nonce, ciphertext, aad []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
-
-	return aead.Open(nil, nonce, ciphertext, aad)
-}
-
-// Server mock
-
+// RealTestDir is a simple mock directory used only in tests.
+//
+// In the real protocol, identities are associated with long-term Ed25519
+// public keys. Here we simulate this behaviour with a map from identity
+// strings to Ed25519 public keys.
 type RealTestDir struct {
 	Keys map[string]ed25519.PublicKey
 }
 
+// GetPublicKey returns the public signing key associated with an identity.
 func (d *RealTestDir) GetPublicKey(id string) (ed25519.PublicKey, error) {
 	key, ok := d.Keys[id]
 	if !ok {
@@ -106,196 +28,362 @@ func (d *RealTestDir) GetPublicKey(id string) (ed25519.PublicKey, error) {
 	return key, nil
 }
 
-func (d *RealTestDir) GetEpoch() uint64 { return 2026 }
+// GetEpoch returns a fixed epoch value for testing purposes.
+func (d *RealTestDir) GetEpoch() uint64 {
+	return 2026
+}
 
-// Helper per gestire il mittente nel test
+// mockSender is a small helper used to simulate message delivery.
+//
+// Instead of sending messages over a real network, the test stores each
+// outgoing message into a local variable.
 type mockSender func(keyexchange.Message) error
 
-func (m mockSender) Send(msg keyexchange.Message) error { return m(msg) }
+func (m mockSender) Send(msg keyexchange.Message) error {
+	return m(msg)
+}
 
-// Test 1: TestCompleteProtocol performs a full simulation of the Authenticated
-// Diffie–Hellman key exchange. At the end, it is checked if the payload
-// decrypted by Bob is correct.
+// newTestProvider returns the real cryptographic provider used by the protocol.
+//
+// This is important: the tests should not duplicate the cryptographic logic.
+// They should test the actual DefaultProvider implementation used in the code.
+func newTestProvider() *keyexchange.DefaultProvider {
+	return keyexchange.NewDefaultProvider()
+}
+
+// TestCompleteProtocol performs a full simulation of the authenticated
+// Diffie-Hellman key exchange between Alice and Bob.
+//
+// The test checks that:
+//   - Alice sends M1;
+//   - Bob verifies M1 and sends M2;
+//   - Alice verifies M2 and sends an encrypted M3;
+//   - Bob decrypts M3 correctly;
+//   - the decrypted payload matches the original one.
 func TestCompleteProtocol(t *testing.T) {
 	logSection(t, "Start key exchange (Alice <-> Bob)")
-	crypto := RealCrypto{}
 
-	// 1. Setup phase.
+	cryptoProvider := newTestProvider()
+
+	// 1. Identity setup.
+	//
+	// Alice and Bob each have a long-term Ed25519 signing key pair.
+	// The public keys are registered in the test directory.
 	logSection(t, "Identity and directory setup")
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	dir := &RealTestDir{
-		Keys: map[string]ed25519.PublicKey{"Alice": pubA, "Bob": pubB},
+
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
 	}
-	logOK(t, "Identities generated and registered in dir")
 
-	// Channels/Variables to simulate the network exchange.
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
+
+	logOK(t, "Identities generated and registered in directory")
+
+	// 2. Network simulation.
+	//
+	// The protocol sends three messages:
+	//   M1: Alice -> Bob
+	//   M2: Bob   -> Alice
+	//   M3: Alice -> Bob
+	//
+	// Instead of using a real network, each sender stores the message
+	// into a local variable.
 	var msgM1, msgM2, msgM3 keyexchange.Message
-	senderToBob := func(msg keyexchange.Message) error { msgM1 = msg; return nil }
-	senderToAlice := func(msg keyexchange.Message) error { msgM2 = msg; return nil }
-	senderFinal := func(msg keyexchange.Message) error { msgM3 = msg; return nil }
 
-	// 2. Alice starts the protocol.
+	senderToBob := mockSender(func(msg keyexchange.Message) error {
+		msgM1 = msg
+		return nil
+	})
+
+	senderToAlice := mockSender(func(msg keyexchange.Message) error {
+		msgM2 = msg
+		return nil
+	})
+
+	senderFinal := mockSender(func(msg keyexchange.Message) error {
+		msgM3 = msg
+		return nil
+	})
+
+	// 3. Alice starts the protocol and sends M1.
 	logSection(t, "Alice initiates M1")
-	stateA, err := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, mockSender(senderToBob), privA)
+
+	stateA, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		senderToBob,
+		privA,
+	)
 	if err != nil {
 		t.Fatalf("StartAsInitiator failed: %v", err)
 	}
+
 	logOK(t, "Alice generated and sent M1")
 
-	// 3. Bob responds to Alice.
+	// 4. Bob receives M1, verifies Alice, and replies with M2.
 	logSection(t, "Bob receives M1 and replies with M2")
-	stateB, err := keyexchange.HandleM1(msgM1, "Bob", crypto, dir, mockSender(senderToAlice), privB)
+
+	stateB, err := keyexchange.HandleM1(
+		msgM1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		senderToAlice,
+		privB,
+	)
 	if err != nil {
 		t.Fatalf("HandleM1 failed: %v", err)
 	}
-	logOK(t, "Bob verified Alice's Identity and sent M2")
 
-	// 4. Alice sends the encrypted payload.
+	logOK(t, "Bob verified Alice's identity and sent M2")
+
+	// 5. Alice receives M2, verifies Bob, derives the session key,
+	// encrypts the payload, and sends M3.
 	logSection(t, "Alice receives M2 and sends M3")
+
 	originalPayload := []byte("A generic secret message")
-	err = keyexchange.HandleM2AsInitiator(stateA, msgM2, crypto, dir, mockSender(senderFinal), originalPayload)
+
+	err = keyexchange.HandleM2AsInitiator(
+		stateA,
+		msgM2,
+		cryptoProvider,
+		dir,
+		senderFinal,
+		originalPayload,
+	)
 	if err != nil {
 		t.Fatalf("HandleM2AsInitiator failed: %v", err)
 	}
+
 	logOK(t, "Alice established the shared secret and encrypted M3")
 
-	// 5. Bob recovers the payload
+	// 6. Bob receives M3 and decrypts the encrypted payload.
 	logSection(t, "Bob receives M3 and decrypts it")
-	decryptedPayload, err := keyexchange.HandleM3(stateB, msgM3, crypto)
+
+	decryptedPayload, err := keyexchange.HandleM3(stateB, msgM3, cryptoProvider)
 	if err != nil {
 		t.Fatalf("HandleM3 failed: %v", err)
 	}
 
-	// 6. Final verification
+	// 7. Final correctness check.
 	if !bytes.Equal(decryptedPayload, originalPayload) {
-		t.Fatalf("Data inconsistency.\nExpected: %s\nGot:      %s", originalPayload, decryptedPayload)
+		t.Fatalf(
+			"data inconsistency.\nExpected: %s\nGot:      %s",
+			originalPayload,
+			decryptedPayload,
+		)
 	}
-	logOK(t, "Protocol completed.")
+
+	logOK(t, "Protocol completed successfully")
 }
 
-// Test 2: TestInitiatorStateInitialization checks the state initialized
-// by Alice During StartAsInitiator.
+// TestInitiatorStateInitialization checks the state initialized by Alice
+// during StartAsInitiator.
 func TestInitiatorStateInitialization(t *testing.T) {
 	logSection(t, "Unit Test: Initiator State")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	// Generate the key.
+	cryptoProvider := newTestProvider()
+
 	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("Failed to generate keys: %v", err)
+		t.Fatalf("failed to generate Alice signing key: %v", err)
 	}
 
-	dir.Keys = map[string]ed25519.PublicKey{"Alice": pubA}
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+		},
+	}
 
-	dummySender := mockSender(func(m keyexchange.Message) error { return nil })
+	dummySender := mockSender(func(m keyexchange.Message) error {
+		return nil
+	})
 
-	// Run StartAsInitiator
-	state, err := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, dummySender, privA)
+	state, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		dummySender,
+		privA,
+	)
 	if err != nil {
 		t.Fatalf("StartAsInitiator failed: %v", err)
 	}
 
-	// Verify if the state is nil
 	if state == nil {
-		t.Fatal("State is nil")
-	}
-	// Verify if the IDs are correct.
-	if state.MyID != "Alice" || state.PeerID != "Bob" {
-		t.Errorf("Wrong IDs in state: got %s->%s", state.MyID, state.PeerID)
-	}
-	// Verify if Alice private key is generated.
-	if len(state.MyPriv) == 0 {
-		t.Error("Ephemeral private key not generated")
-	}
-	// Verify if the nonce is generated.
-	if len(state.NonceA) == 0 {
-		t.Error("Nonce A was not generated")
+		t.Fatal("state is nil")
 	}
 
-	logOK(t, "Initiator state correctly initialized with DH material and nonces")
+	if state.MyID != "Alice" || state.PeerID != "Bob" {
+		t.Errorf("wrong IDs in state: got %s -> %s", state.MyID, state.PeerID)
+	}
+
+	if len(state.MyPriv) == 0 {
+		t.Error("ephemeral private key was not generated")
+	}
+
+	if len(state.MyPub) == 0 {
+		t.Error("ephemeral public key was not generated")
+	}
+
+	if len(state.NonceA) == 0 {
+		t.Error("NonceA was not generated")
+	}
+
+	logOK(t, "Initiator state correctly initialized with DH material and nonce")
 }
 
-// Test 3: TestResponderStateInitialization checks the state initialized
-// by Bob in HandleM1.
+// TestResponderStateInitialization checks the state initialized by Bob
+// when handling Alice's M1.
 func TestResponderStateInitialization(t *testing.T) {
 	logSection(t, "Responder State from HandleM1")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	// Setup Alice and Bob in the Directory.
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	dir.Keys = map[string]ed25519.PublicKey{"Alice": pubA, "Bob": pubB}
+	cryptoProvider := newTestProvider()
 
-	// Run StartAsInitiator.
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
+	}
+
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
+
 	var msgM1 keyexchange.Message
+
 	aliceSender := mockSender(func(m keyexchange.Message) error {
 		msgM1 = m
 		return nil
 	})
 
-	stateA, err := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, aliceSender, privA)
+	stateA, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		aliceSender,
+		privA,
+	)
 	if err != nil {
 		t.Fatalf("Alice failed to start: %v", err)
 	}
 
-	// Run HandleM1
-	stateB, err := keyexchange.HandleM1(msgM1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { return nil }), privB)
+	stateB, err := keyexchange.HandleM1(
+		msgM1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error { return nil }),
+		privB,
+	)
 	if err != nil {
 		t.Fatalf("Bob failed to handle M1: %v", err)
 	}
 
-	// Verify if the two NonceA correspond.
 	if !bytes.Equal(stateB.NonceA, stateA.NonceA) {
 		t.Error("Bob's NonceA does not match Alice's NonceA")
 	}
 
-	// Verify if the two Alice public key correspond.
 	if !bytes.Equal(stateB.PeerPub, stateA.MyPub) {
 		t.Error("Bob's PeerPub does not match Alice's MyPub")
 	}
 
-	// Verify if Bob private key and NonceB are generated.
-	if len(stateB.MyPriv) == 0 || len(stateB.NonceB) == 0 {
-		t.Error("Bob's ephemeral material is missing")
+	if len(stateB.MyPriv) == 0 {
+		t.Error("Bob's ephemeral private key is missing")
+	}
+
+	if len(stateB.MyPub) == 0 {
+		t.Error("Bob's ephemeral public key is missing")
+	}
+
+	if len(stateB.NonceB) == 0 {
+		t.Error("Bob's NonceB is missing")
 	}
 
 	logOK(t, "Bob's state is synchronized with Alice's initial state")
 }
 
-// Test 4: TestHandleM1WrongRecipient verifies that Bob rejects an M1 message
-// generated by Alice for Charles but send to Bob.
+// TestHandleM1WrongRecipient verifies that Bob rejects an M1 message
+// generated by Alice for Charles but delivered to Bob.
 func TestHandleM1WrongRecipient(t *testing.T) {
 	logSection(t, "M1 Wrong Recipient")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	pubC, _, _ := ed25519.GenerateKey(rand.Reader)
+	cryptoProvider := newTestProvider()
 
-	dir.Keys = map[string]ed25519.PublicKey{
-		"Alice":   pubA,
-		"Bob":     pubB,
-		"Charles": pubC,
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
 	}
 
-	// Alice prepares M1 for Charles.
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	pubC, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Charles signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice":   pubA,
+			"Bob":     pubB,
+			"Charles": pubC,
+		},
+	}
+
 	var msgM1 keyexchange.Message
+
 	aliceSender := mockSender(func(m keyexchange.Message) error {
 		msgM1 = m
 		return nil
 	})
 
-	_, err := keyexchange.StartAsInitiator("Alice", "Charles", crypto, dir, aliceSender, privA)
+	_, err = keyexchange.StartAsInitiator(
+		"Alice",
+		"Charles",
+		cryptoProvider,
+		dir,
+		aliceSender,
+		privA,
+	)
 	if err != nil {
 		t.Fatalf("StartAsInitiator failed: %v", err)
 	}
 
-	// Suppose M1 is delivered to Bob instead of Charles.
-	_, err = keyexchange.HandleM1(msgM1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { return nil }), privB)
+	// The message was intended for Charles, but Bob receives it.
+	// Bob must reject it because the recipient identity does not match.
+	_, err = keyexchange.HandleM1(
+		msgM1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error { return nil }),
+		privB,
+	)
 
 	if err == nil {
 		t.Error("Bob accepted a message intended for Charles")
@@ -304,64 +392,170 @@ func TestHandleM1WrongRecipient(t *testing.T) {
 	}
 }
 
-// Test 5: TestAliceRejectsCorruptedM2 verifies if Alice rejects a forged
-// signature of M2.
+// TestAliceRejectsCorruptedM2 verifies that Alice rejects M2 if Bob's
+// signature has been modified.
 func TestAliceRejectsCorruptedM2(t *testing.T) {
 	logSection(t, "Alice verifies Bob's signature")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	dir.Keys = map[string]ed25519.PublicKey{"Alice": pubA, "Bob": pubB}
+	cryptoProvider := newTestProvider()
+
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
+	}
+
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
 
 	var m1 keyexchange.Message
-	stateA, _ := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m1 = m; return nil }), privA)
+
+	stateA, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m1 = m
+			return nil
+		}),
+		privA,
+	)
+	if err != nil {
+		t.Fatalf("StartAsInitiator failed: %v", err)
+	}
 
 	var m2 keyexchange.Message
-	keyexchange.HandleM1(m1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m2 = m; return nil }), privB)
 
-	// Suppose an attacker intercepts M2 and modifies Bob's signature.
-	if sig, ok := m2.Data["sig"]; ok && len(sig) > 0 {
-		sig[0] ^= 0xFF
-	} else {
+	_, err = keyexchange.HandleM1(
+		m1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m2 = m
+			return nil
+		}),
+		privB,
+	)
+	if err != nil {
+		t.Fatalf("HandleM1 failed: %v", err)
+	}
+
+	// An attacker corrupts Bob's signature in M2.
+	sig, ok := m2.Data["sig"]
+	if !ok || len(sig) == 0 {
 		t.Fatal("M2 sig field not found or empty")
 	}
 
-	// Verify if Alice rejects the forged signature.
-	err := keyexchange.HandleM2AsInitiator(stateA, m2, crypto, dir, mockSender(func(m keyexchange.Message) error { return nil }), []byte("secret"))
+	sig[0] ^= 0xFF
+
+	// Alice must reject the forged M2.
+	err = keyexchange.HandleM2AsInitiator(
+		stateA,
+		m2,
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error { return nil }),
+		[]byte("secret"),
+	)
+
 	if err == nil {
-		t.Error("Alice accepted M2 with a corrupted signature!")
+		t.Error("Alice accepted M2 with a corrupted signature")
 	} else {
 		logOK(t, "Alice correctly rejected the forged M2")
 	}
 }
 
-// Test 6: TestBobRejectsTamperedPayloadM3 verifies that Bob detects a
-// tampered M3 ciphertext.
+// TestBobRejectsTamperedPayloadM3 verifies that Bob detects a modified M3
+// ciphertext through AEAD authentication.
 func TestBobRejectsTamperedPayloadM3(t *testing.T) {
 	logSection(t, "Security Test: Bob verifies AEAD integrity (M3)")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	dir.Keys = map[string]ed25519.PublicKey{"Alice": pubA, "Bob": pubB}
+	cryptoProvider := newTestProvider()
+
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
+	}
+
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
 
 	var m1, m2, m3 keyexchange.Message
-	stateA, _ := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m1 = m; return nil }), privA)
-	stateB, _ := keyexchange.HandleM1(m1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m2 = m; return nil }), privB)
-	keyexchange.HandleM2AsInitiator(stateA, m2, crypto, dir, mockSender(func(m keyexchange.Message) error { m3 = m; return nil }), []byte("top secret share"))
 
-	// Suppose an attacker intercepts and modifies M3 ciphertext.
-	if ct, ok := m3.Data["ct"]; ok && len(ct) > 0 {
-		ct[0] ^= 0xFF
-	} else {
+	stateA, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m1 = m
+			return nil
+		}),
+		privA,
+	)
+	if err != nil {
+		t.Fatalf("StartAsInitiator failed: %v", err)
+	}
+
+	stateB, err := keyexchange.HandleM1(
+		m1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m2 = m
+			return nil
+		}),
+		privB,
+	)
+	if err != nil {
+		t.Fatalf("HandleM1 failed: %v", err)
+	}
+
+	err = keyexchange.HandleM2AsInitiator(
+		stateA,
+		m2,
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m3 = m
+			return nil
+		}),
+		[]byte("top secret share"),
+	)
+	if err != nil {
+		t.Fatalf("HandleM2AsInitiator failed: %v", err)
+	}
+
+	// An attacker modifies the ciphertext.
+	ct, ok := m3.Data["ct"]
+	if !ok || len(ct) == 0 {
 		t.Fatal("M3 Data['ct'] not found or empty")
 	}
 
-	// Verify that Bob detects the tampered message during the AEAD decryption.
-	_, err := keyexchange.HandleM3(stateB, m3, crypto)
+	ct[0] ^= 0xFF
+
+	// Bob must reject the message because AEAD authentication fails.
+	_, err = keyexchange.HandleM3(stateB, m3, cryptoProvider)
 	if err == nil {
 		t.Error("Bob decrypted a tampered message without error")
 	} else {
@@ -369,33 +563,63 @@ func TestBobRejectsTamperedPayloadM3(t *testing.T) {
 	}
 }
 
-// Test 7: TestIdentitySpoofingM1 ensures that Bob rejects an M1 message
-// where the sender claims to be Alice but the signature is forged by an attacker.
+// TestIdentitySpoofingM1 ensures that Bob rejects an M1 message where
+// the sender claims to be Alice but the signature was generated with
+// Eve's private key.
 func TestIdentitySpoofingM1(t *testing.T) {
 	logSection(t, "Security Test: M1 Identity Spoofing")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	pubA, _, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
+	cryptoProvider := newTestProvider()
 
-	// Generate Eve keys.
-	_, privEve, _ := ed25519.GenerateKey(rand.Reader)
-
-	dir.Keys = map[string]ed25519.PublicKey{
-		"Alice": pubA,
-		"Bob":   pubB,
+	pubA, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
 	}
 
-	// Eve sends M1, signed with her key, claiming to be Alice.
-	var m1 keyexchange.Message
-	_, _ = keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error {
-		m1 = m
-		return nil
-	}), privEve)
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
 
-	// Bob receives M1 and verifies the signature.
-	_, err := keyexchange.HandleM1(m1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { return nil }), privB)
+	_, privEve, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Eve signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
+
+	var m1 keyexchange.Message
+
+	// Eve signs the message using her own private key, but the identity
+	// inside the protocol message claims to be Alice.
+	_, _ = keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m1 = m
+			return nil
+		}),
+		privEve,
+	)
+
+	// Bob must verify the signature using Alice's registered public key.
+	// Since the message was signed by Eve, verification must fail.
+	_, err = keyexchange.HandleM1(
+		m1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error { return nil }),
+		privB,
+	)
+
 	if err == nil {
 		t.Error("Bob accepted an M1 from an impostor claiming to be Alice")
 	} else {
@@ -403,34 +627,92 @@ func TestIdentitySpoofingM1(t *testing.T) {
 	}
 }
 
-// Test 8: TestTranscriptMismatched verifies that Bob rejects the final message
-// if his session state, in particular the Nonce and so the Transcript, has been tampered with.
+// TestTranscriptMismatchM3 verifies that Bob rejects the final message if
+// his local session transcript has been modified.
+//
+// Since the transcript is used during key derivation, changing NonceA in
+// Bob's state should cause Bob to derive a different AEAD key. Therefore,
+// decryption of M3 must fail.
 func TestTranscriptMismatchM3(t *testing.T) {
 	logSection(t, "Session Transcript Integrity")
-	crypto := RealCrypto{}
-	dir := &RealTestDir{}
 
-	pubA, privA, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, privB, _ := ed25519.GenerateKey(rand.Reader)
-	dir.Keys = map[string]ed25519.PublicKey{"Alice": pubA, "Bob": pubB}
+	cryptoProvider := newTestProvider()
+
+	pubA, privA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Alice signing key: %v", err)
+	}
+
+	pubB, privB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate Bob signing key: %v", err)
+	}
+
+	dir := &RealTestDir{
+		Keys: map[string]ed25519.PublicKey{
+			"Alice": pubA,
+			"Bob":   pubB,
+		},
+	}
 
 	var m1, m2, m3 keyexchange.Message
-	stateA, _ := keyexchange.StartAsInitiator("Alice", "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m1 = m; return nil }), privA)
-	stateB, _ := keyexchange.HandleM1(m1, "Bob", crypto, dir, mockSender(func(m keyexchange.Message) error { m2 = m; return nil }), privB)
 
-	keyexchange.HandleM2AsInitiator(stateA, m2, crypto, dir, mockSender(func(m keyexchange.Message) error { m3 = m; return nil }), []byte("secret share"))
+	stateA, err := keyexchange.StartAsInitiator(
+		"Alice",
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m1 = m
+			return nil
+		}),
+		privA,
+	)
+	if err != nil {
+		t.Fatalf("StartAsInitiator failed: %v", err)
+	}
 
-	// Suppose an attacker intercepts NonceA and modifies it.
-	if len(stateB.NonceA) > 0 {
-		stateB.NonceA[0] ^= 0xFF
-	} else {
+	stateB, err := keyexchange.HandleM1(
+		m1,
+		"Bob",
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m2 = m
+			return nil
+		}),
+		privB,
+	)
+	if err != nil {
+		t.Fatalf("HandleM1 failed: %v", err)
+	}
+
+	err = keyexchange.HandleM2AsInitiator(
+		stateA,
+		m2,
+		cryptoProvider,
+		dir,
+		mockSender(func(m keyexchange.Message) error {
+			m3 = m
+			return nil
+		}),
+		[]byte("secret share"),
+	)
+	if err != nil {
+		t.Fatalf("HandleM2AsInitiator failed: %v", err)
+	}
+
+	if len(stateB.NonceA) == 0 {
 		t.Fatal("NonceA is missing from Bob's state")
 	}
 
-	// Bob tries to decrypt M3 but it must fail since the transcript doesn't match Alice's.
-	_, err := keyexchange.HandleM3(stateB, m3, crypto)
+	// The local transcript stored by Bob is modified.
+	// Bob will therefore derive a different session key.
+	stateB.NonceA[0] ^= 0xFF
+
+	_, err = keyexchange.HandleM3(stateB, m3, cryptoProvider)
 	if err == nil {
-		t.Error("Bob accepted M3 despite a Transcript mismatch")
+		t.Error("Bob accepted M3 despite a transcript mismatch")
 	} else {
 		logOK(t, "Bob detected the session history inconsistency")
 	}

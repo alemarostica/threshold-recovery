@@ -15,6 +15,7 @@ func testSessionID(seed byte) []byte {
 	return id
 }
 
+// makeParticipantNonce generates and sets a participant nonce share.
 func makeParticipantNonce(t *testing.T, ps *crypto.ParticipantSigner) crypto.NonceShare {
 	t.Helper()
 
@@ -38,6 +39,7 @@ func makeParticipantNonce(t *testing.T, ps *crypto.ParticipantSigner) crypto.Non
 	return nonce
 }
 
+// makeServerNonce is analogous to makeParticipantNonce, but for the server nonce share.
 func makeServerNonce(t *testing.T, ss *crypto.ServerSigner) crypto.NonceShare {
 	t.Helper()
 
@@ -61,6 +63,8 @@ func makeServerNonce(t *testing.T, ss *crypto.ServerSigner) crypto.NonceShare {
 	return nonce
 }
 
+// makeMaterial1 constructs the first protocol message containing participant index
+// and nonce commitment.
 func makeMaterial1(t *testing.T, n crypto.NonceShare) crypto.MaterialToSend1 {
 	t.Helper()
 
@@ -76,6 +80,8 @@ func makeMaterial1(t *testing.T, n crypto.NonceShare) crypto.MaterialToSend1 {
 	return m
 }
 
+// makeMaterial2 constructs the second protocol message containing the participant index
+// and public nonce value (Ri).
 func makeMaterial2(t *testing.T, n crypto.NonceShare) crypto.MaterialToSend2 {
 	t.Helper()
 
@@ -91,6 +97,8 @@ func makeMaterial2(t *testing.T, n crypto.NonceShare) crypto.MaterialToSend2 {
 	return m
 }
 
+// checkShareConsistency builds a participant and verifies that its share
+// is consistent with the dealer's VSS commitment.
 func checkShareConsistency(
 	t *testing.T,
 	name string,
@@ -127,6 +135,7 @@ func checkShareConsistency(
 	return p
 }
 
+// initParticipantSigner initializes and configures a participant signer for LSSS reconstruction.
 func initParticipantSigner(
 	t *testing.T,
 	name string,
@@ -149,7 +158,7 @@ func initParticipantSigner(
 	}
 
 	if err := ps.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("failed to set %s Lagrange coefficient: %v", name, err)
+		t.Fatalf("failed to set %s signing coefficient: %v", name, err)
 	}
 
 	logOK(t, name+" signer initialized")
@@ -157,6 +166,8 @@ func initParticipantSigner(
 	return ps
 }
 
+// verifyNonceFromParticipant verifies a participant's nonce commitment
+// (server-side) using MaterialToSend1 and MaterialToSend2.
 func verifyNonceFromParticipant(
 	t *testing.T,
 	server *crypto.ServerSigner,
@@ -179,16 +190,16 @@ func verifyNonceFromParticipant(
 	logOK(t, name+" nonce commitment verified")
 }
 
-// Test 1
+// Test 1: TestLSSSFullSigningFlow verifies the complete execution of the
+// LSSS + VSS + threshold Schnorr signing protocol.
 func TestLSSSFullSigningFlow(t *testing.T) {
 	logSection(t, "LSSS / VSS + Threshold Signing - Full Flow")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// 1. Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
 
 	logSection(t, "1. Dealer setup")
 
@@ -219,9 +230,8 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	}
 	logOK(t, "Dealer generated VSS commitments and distributed shares")
 
-	// -------------------------------------------------------------------------
-	// Share consistency verification
-	// -------------------------------------------------------------------------
+	// 2. Each participant verifies that their received share is
+	// consistent with dealer's public commitment.
 
 	logSection(t, "2. Share consistency verification")
 
@@ -236,17 +246,15 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 
 	logOK(t, "All received participant shares passed VSS consistency verification")
 
-	// -------------------------------------------------------------------------
-	// Server and signing session setup
-	// -------------------------------------------------------------------------
+	// 3. Build the authorized signing group (server + k participants)
+	// and initialize session data.
 
 	logSection(t, "3. Server and signing session setup")
 
 	S := new(crypto.Server)
 	ServerS := new(crypto.ServerSigner)
 
-	// IMPORTANT:
-	// indices contains only the signing participants.
+	// ids contains only the signing participants,
 	// ServerID is handled separately by the protocol.
 	ids := []crypto.ParticipantID{1, 3, 4}
 	logOK(t, fmt.Sprintf("Signing participant indices selected: %v", ids))
@@ -277,9 +285,9 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	ServerS.SetSession(&sess)
 
 	if err := ServerS.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("failed to set server Lagrange coefficient: %v", err)
+		t.Fatalf("failed to set server signing coefficient: %v", err)
 	}
-	logOK(t, "Server Lagrange coefficient computed")
+	logOK(t, "Server signing coefficient computed")
 
 	PinoS := initParticipantSigner(t, "Pino", Pino, P, ids, &sess)
 	GianniS := initParticipantSigner(t, "Gianni", Gianni, P, ids, &sess)
@@ -287,9 +295,8 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 
 	logOK(t, "Participant signers initialized with same public key, indices, and session")
 
-	// -------------------------------------------------------------------------
-	// Nonce commitment phase
-	// -------------------------------------------------------------------------
+	// 4. All signing parties generate nonce commitment and reveal
+	// their public nonces.
 
 	logSection(t, "4. Nonce commitment phase")
 
@@ -329,15 +336,14 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 
 	logOK(t, "M2 messages created: public nonce openings for server and all signing participants")
 
+	// Server checks that each revealed nonce matches its commitment.
 	verifyNonceFromParticipant(t, ServerS, "Pino", PinoS)
 	verifyNonceFromParticipant(t, ServerS, "Gianni", GianniS)
 	verifyNonceFromParticipant(t, ServerS, "Cornelio", CornelioS)
 
 	logOK(t, "Server verified that each participant's M2 opening matches its previous M1 commitment")
 
-	// -------------------------------------------------------------------------
-	// Aggregate nonce computation
-	// -------------------------------------------------------------------------
+	// 5. All the authorized signers compute the same aggregate nonce R.
 
 	logSection(t, "5. Aggregate nonce computation")
 
@@ -372,9 +378,8 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 
 	logOK(t, "All signing parties are now bound to the same aggregate nonce R")
 
-	// -------------------------------------------------------------------------
-	// Partial signature generation
-	// -------------------------------------------------------------------------
+	// 6. Each signer produces its own partial Schnorr signature, using
+	// its share, nonce, and session challenge.
 
 	logSection(t, "6. Partial signature generation")
 
@@ -401,9 +406,7 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	}
 	logOK(t, "Cornelio computed his partial signature using participant share and nonce")
 
-	// -------------------------------------------------------------------------
-	// Final signature combination
-	// -------------------------------------------------------------------------
+	// 7. Partial signatures are combined into the final threshold signature.
 
 	logSection(t, "7. Final signature combination")
 
@@ -455,9 +458,8 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	}
 	logOK(t, "Server-combined and Cornelio-combined signatures are identical")
 
-	// -------------------------------------------------------------------------
-	// Reconstruction sanity check
-	// -------------------------------------------------------------------------
+	//  8. Reconstruct the dealer secret from the authorized set
+	// to confirm that shares and coefficients are correct.
 
 	logSection(t, "8. Reconstruction sanity check")
 
@@ -516,9 +518,9 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	}
 	logOK(t, "Dealer public key matches the public key derived from the secret")
 
-	// -------------------------------------------------------------------------
-	// Final signature verification
-	// -------------------------------------------------------------------------
+	// 9. Verify that the final signature is valid.
+	// It is sufficient to verify the validity of the Server signature, since
+	// it was previously verified that all signers have obtained the same Z.
 
 	logSection(t, "9. Final signature verification")
 
@@ -562,17 +564,16 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	logOK(t, "The full LSSS threshold signing flow is valid")
 }
 
-// Test 2
+// Test 2: TestParticipantRejectsTamperedShare verifies that a participant
+// rejects a tampered LSSS share even if the dealer commitment is unchanged.
 func TestParticipantRejectsTamperedShare(t *testing.T) {
 	logSection(t, "Security Test: Participant Rejects Tampered Share")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
-
+	// Dealer generates the secret, distributes valid shares,
+	// and publishes commitment for verifiable secret sharing.
 	logSection(t, "1. Dealer setup")
 
 	dealer := new(crypto.Dealer)
@@ -596,11 +597,9 @@ func TestParticipantRejectsTamperedShare(t *testing.T) {
 	if err := dealer.SetCommAndShares(); err != nil {
 		t.Fatalf("failed to generate commitment and shares: %v", err)
 	}
-	logOK(t, "Dealer generated VSS commitments and distributed valid shares")
+	logOK(t, "Dealer generated VSS commitment and distributed valid shares")
 
-	// -------------------------------------------------------------------------
-	// Honest participant initialization
-	// -------------------------------------------------------------------------
+	// Initialize a participant and retrieve the original assigned share.
 
 	logSection(t, "2. Honest participant initialization")
 
@@ -619,25 +618,23 @@ func TestParticipantRejectsTamperedShare(t *testing.T) {
 	share := dealer.GetParticipantShares(0)
 	logOK(t, "Original valid share for Pino retrieved from the dealer")
 
-	// -------------------------------------------------------------------------
-	// Tampering attack
-	// -------------------------------------------------------------------------
+	// Simulate post-distribution tampering by modifying the share,
+	// leaving the dealer's public commitment unchanged.
 
 	logSection(t, "3. Tampering attack")
 
 	var tamperedShare crypto.Scalar
 	tamperedShare.Add(&share, &crypto.One)
 
-	logOK(t, "Pino's original share was modified by adding 1 to the scalar value")
+	logOK(t, "Pino's original share was modified by adding 1")
 
 	if err := p.SetShare(tamperedShare); err != nil {
 		t.Fatalf("failed to assign tampered share to Pino: %v", err)
 	}
+
 	logOK(t, "Tampered share assigned to Pino while keeping the original public commitment unchanged")
 
-	// -------------------------------------------------------------------------
-	// VSS consistency verification
-	// -------------------------------------------------------------------------
+	// Verify that the altered share is detected and rejected.
 
 	logSection(t, "4. VSS consistency verification")
 
@@ -653,19 +650,18 @@ func TestParticipantRejectsTamperedShare(t *testing.T) {
 	}
 
 	logOK(t, "VSS consistency verification rejected the tampered share")
-	logOK(t, "Tampered share attack correctly failed")
 }
 
-// Test 3
+// Test 3: TestTamperedPartialSignature verifies that a tampered partial
+// signature is detected and causes final verification to fail.
 func TestTamperedPartialSignature(t *testing.T) {
 	logSection(t, "Security Test: Tampered Partial Signature")
 
 	n := 4
 	k := 2
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
 
 	logSection(t, "1. Dealer setup")
 
@@ -696,14 +692,9 @@ func TestTamperedPartialSignature(t *testing.T) {
 	P := *new(crypto.Point).ScalarBaseMult(&secret)
 	logOK(t, "Public key P = secret * G computed")
 
-	// -------------------------------------------------------------------------
-	// Signing session setup
-	// -------------------------------------------------------------------------
-
+	// Initialize session and server signer.
 	logSection(t, "2. Signing session setup")
 
-	// indices contains only the signing participants.
-	// ServerID is handled separately by the protocol.
 	ids := []crypto.ParticipantID{1, 2}
 	logOK(t, fmt.Sprintf("Signing participant indices selected: %v", ids))
 	logOK(t, "ServerID is not included in indices and is handled separately")
@@ -733,12 +724,9 @@ func TestTamperedPartialSignature(t *testing.T) {
 	if err := ss.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server lagrange failed: %v", err)
 	}
-	logOK(t, "Server signer initialized and server Lagrange coefficient computed")
+	logOK(t, "Server signer initialized and server signing coefficient computed")
 
-	// -------------------------------------------------------------------------
-	// Share consistency verification
-	// -------------------------------------------------------------------------
-
+	// Participants verify share consistency with the dealer commitment.
 	logSection(t, "3. Share consistency verification")
 
 	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
@@ -751,9 +739,7 @@ func TestTamperedPartialSignature(t *testing.T) {
 
 	logOK(t, "Participant signers initialized with same public key, indices, and session")
 
-	// -------------------------------------------------------------------------
-	// Nonce generation and aggregate nonce computation
-	// -------------------------------------------------------------------------
+	// Participants and server derive aggregate nonce R.
 
 	logSection(t, "4. Nonce generation and aggregate nonce computation")
 
@@ -788,9 +774,7 @@ func TestTamperedPartialSignature(t *testing.T) {
 	}
 	logOK(t, "P2 computed the same aggregate nonce R")
 
-	// -------------------------------------------------------------------------
-	// Honest partial signature generation
-	// -------------------------------------------------------------------------
+	// Generate partial signatures.
 
 	logSection(t, "5. Honest partial signature generation")
 
@@ -812,18 +796,16 @@ func TestTamperedPartialSignature(t *testing.T) {
 	}
 	logOK(t, "P2 computed its honest partial signature")
 
-	// -------------------------------------------------------------------------
-	// Attack: tamper with one partial signature
-	// -------------------------------------------------------------------------
+	// Simulate adversarial tampering of one valid partial signature
+	// before threshold aggregation.
 
 	logSection(t, "6. Tampering attack")
 
 	tampered := ps1.GetPartialSignature()
 
-	// Tamper with P1's partial signature while keeping its index unchanged.
 	tampered.Z.Add(&tampered.Z, &crypto.One)
 
-	logOK(t, "P1 partial signature was modified while keeping the same participant index")
+	logOK(t, "P1 partial signature was tampered while keeping the same participant index")
 
 	attacked := []crypto.PartialSignature{
 		ss.GetPartialSignature(),
@@ -833,9 +815,7 @@ func TestTamperedPartialSignature(t *testing.T) {
 
 	logOK(t, "Built attacked partial signature vector: server honest + P1 tampered + P2 honest")
 
-	// -------------------------------------------------------------------------
-	// Combination and final verification
-	// -------------------------------------------------------------------------
+	// Combine partial signatures and attempt final verification.
 
 	logSection(t, "7. Combination and final verification")
 
@@ -860,16 +840,17 @@ func TestTamperedPartialSignature(t *testing.T) {
 	logOK(t, "Tampered partial signature attack correctly failed")
 }
 
-// Test 4
+// Test 4: TestReplayAttackDifferentSession verifies that replaying a valid
+// partial signature from one session into a different session is detected
+// and causes final verification to fail.
 func TestReplayAttackDifferentSession(t *testing.T) {
 	logSection(t, "Security Test: Replay Attack Across Sessions")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
 
 	logSection(t, "1. Dealer setup")
 
@@ -903,8 +884,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 
 	logOK(t, "Public key P = secret * G computed")
 
-	// indices contains only the signing participants.
-	// ServerID is handled separately by the protocol.
+	// ids contains only the signing participants.
 	ids := []crypto.ParticipantID{1, 3, 4}
 	logOK(t, fmt.Sprintf("Signing participant indices selected: %v", ids))
 	logOK(t, "ServerID is not included in indices and is handled separately")
@@ -912,9 +892,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	msg := []byte("hello")
 	logOK(t, fmt.Sprintf("Message to be signed set: %q", msg))
 
-	// -------------------------------------------------------------------------
-	// Share consistency verification
-	// -------------------------------------------------------------------------
+	// Participants verify share consistency with the dealer commitment.
 
 	logSection(t, "2. Share consistency verification")
 
@@ -924,9 +902,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 
 	logOK(t, "All selected participant shares passed VSS consistency verification")
 
-	// =========================================================================
-	// Session 1: legitimate session from which we steal one old partial
-	// =========================================================================
+	// Initialize Session 1 as a legitimate signing session.
 
 	logSection(t, "3. Session 1 setup")
 
@@ -955,7 +931,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	if err := serverSigner1.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server1 lagrange failed: %v", err)
 	}
-	logOK(t, "Session 1 server signer initialized and Lagrange coefficient computed")
+	logOK(t, "Session 1 server signer initialized and signing coefficient computed")
 
 	ps1Sess1 := initParticipantSigner(t, "P1-S1", p1, P, ids, &sess1)
 	ps3Sess1 := initParticipantSigner(t, "P3-S1", p3, P, ids, &sess1)
@@ -963,9 +939,8 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 
 	logOK(t, "Session 1 participant signers initialized")
 
-	// -------------------------------------------------------------------------
-	// Session 1 nonce generation and aggregate R
-	// -------------------------------------------------------------------------
+	// Session 1 participants and server generate nonces and compute
+	// aggregate nonce R.
 
 	logSection(t, "4. Session 1 nonce generation and aggregate nonce computation")
 
@@ -1009,9 +984,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	}
 	logOK(t, "Session 1 P4 computed aggregate nonce R")
 
-	// -------------------------------------------------------------------------
-	// Session 1 partial signatures
-	// -------------------------------------------------------------------------
+	// Generate valid partial signatures for Session 1.
 
 	logSection(t, "5. Session 1 partial signature generation")
 
@@ -1035,14 +1008,12 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	}
 	logOK(t, "Session 1 P4 partial signature generated")
 
-	// Replay target: old P1 partial from session 1.
+	// Store one valid Session 1 partial signature for replay.
 	replayedPartial := ps1Sess1.GetPartialSignature()
 
 	logOK(t, "Stored P1 partial signature from session 1 as replay target")
 
-	// =========================================================================
-	// Session 2: attack target
-	// =========================================================================
+	// Session 2 reuses the sam signing set but introduces a new session identifier.
 
 	logSection(t, "6. Session 2 setup")
 
@@ -1069,7 +1040,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	if err := serverSigner2.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server2 lagrange failed: %v", err)
 	}
-	logOK(t, "Session 2 server signer initialized and Lagrange coefficient computed")
+	logOK(t, "Session 2 server signer initialized and signing coefficient computed")
 
 	ps1Sess2 := initParticipantSigner(t, "P1-S2", p1, P, ids, &sess2)
 	ps3Sess2 := initParticipantSigner(t, "P3-S2", p3, P, ids, &sess2)
@@ -1077,9 +1048,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 
 	logOK(t, "Session 2 participant signers initialized")
 
-	// -------------------------------------------------------------------------
-	// Session 2 nonce generation and aggregate R
-	// -------------------------------------------------------------------------
+	// Session 2 signers generate new nonces and derive a new aggregate nonce R.
 
 	logSection(t, "7. Session 2 nonce generation and aggregate nonce computation")
 
@@ -1123,9 +1092,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	}
 	logOK(t, "Session 2 P4 computed fresh aggregate nonce R")
 
-	// -------------------------------------------------------------------------
-	// Session 2 fresh partial signatures
-	// -------------------------------------------------------------------------
+	// Generate valid partial signatures for Session 2.
 
 	logSection(t, "8. Session 2 fresh partial signature generation")
 
@@ -1149,15 +1116,14 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	}
 	logOK(t, "Session 2 P4 fresh partial signature generated")
 
-	// -------------------------------------------------------------------------
-	// Attack: replace P1's fresh partial with P1's old session 1 partial
-	// -------------------------------------------------------------------------
+	// Replace one fresh partial signature with a valid partial signature
+	// replayed from Session 1.
 
 	logSection(t, "9. Replay attack attempt")
 
 	attackedPartials := []crypto.PartialSignature{
 		serverSigner2.GetPartialSignature(),
-		replayedPartial, // old P1 partial from session 1
+		replayedPartial, // P1 partial signature from Session 1 (replayed)
 		ps3Sess2.GetPartialSignature(),
 		ps4Sess2.GetPartialSignature(),
 	}
@@ -1165,9 +1131,6 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	logOK(t, "Built attacked partial signature vector for session 2")
 	logOK(t, "P1 fresh session 2 partial was replaced with P1 old session 1 partial")
 
-	// CombineSignature only aggregates structurally valid partial signatures.
-	// The replay is detected by final signature verification, because the old
-	// partial was computed with a different session/challenge.
 	if err := serverSigner2.CombineSignature(attackedPartials); err != nil {
 		t.Fatalf("combine failed unexpectedly: %v", err)
 	}
@@ -1189,174 +1152,18 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	logOK(t, "Replay attack across sessions correctly failed")
 }
 
-// Test 5
-func TestMalformedPartialSignature(t *testing.T) {
-	logSection(t, "Security Test: Rogue-Nonce Reuse Across Sessions")
-
-	n := 4
-	k := 2
-
-	// -------------------------------------------------------------------------
-	// Setup iniziale del Dealer e della Chiave Pubblica
-	// -------------------------------------------------------------------------
-	logSection(t, "1. Dealer and Public Key Setup")
-	dealer := new(crypto.Dealer)
-	if err := dealer.SetTsParameters(n, k); err != nil {
-		t.Fatalf("failed params: %v", err)
-	}
-	if err := dealer.SetSecret(); err != nil {
-		t.Fatalf("failed secret: %v", err)
-	}
-	if err := dealer.SetFriends([]string{"Alice", "Bob", "Charlie", "Dave"}); err != nil {
-		t.Fatalf("failed friends: %v", err)
-	}
-	if err := dealer.SetCommAndShares(); err != nil {
-		t.Fatalf("failed shares: %v", err)
-	}
-
-	secret := dealer.GetSecret()
-	var P crypto.Point
-	P.ScalarBaseMult(&secret)
-	logOK(t, "Public key P = secret * G computed")
-
-	ids := []crypto.ParticipantID{1, 2}
-	msg2 := []byte("message-two")
-
-	// Verifica consistenza delle share dal dealer
-	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
-	p2 := checkShareConsistency(t, "P2", 2, 1, dealer)
-	logOK(t, "Participant shares passed VSS consistency verification")
-
-	// =========================================================================
-	// SESSIONE 1: Sessione fittizia per inizializzare il contesto di P1
-	// =========================================================================
-	logSection(t, "2. Session 1 Setup")
-	var sess1 crypto.Session
-	if err := sess1.SetID(testSessionID(0x12)); err != nil {
-		t.Fatalf("failed session1 ID: %v", err)
-	}
-	sess1.SetIndices(ids)
-	sess1.SetIndexHash(ids)
-
-	ps1Sess1 := initParticipantSigner(t, "P1-S1", p1, P, ids, &sess1)
-	_ = makeParticipantNonce(t, ps1Sess1)
-	logOK(t, "Session 1 signed state initialized for P1")
-
-	// =========================================================================
-	// SESSIONE 2: Sessione target dell'attacco
-	// =========================================================================
-	logSection(t, "3. Session 2 Setup and Nonce Generation")
-	var sess2 crypto.Session
-	if err := sess2.SetID(testSessionID(0x13)); err != nil {
-		t.Fatalf("failed session2 ID: %v", err)
-	}
-	sess2.SetIndices(ids)
-	sess2.SetIndexHash(ids)
-
-	// Inizializzazione Server Signer per Sessione 2
-	server2 := new(crypto.Server)
-	server2.SetShare(dealer.GetServerShare())
-	aux := dealer.GetTsParameters()
-	server2.SetParams(&aux)
-
-	ss2 := new(crypto.ServerSigner)
-	ss2.SetServer(*server2)
-	ss2.SetP(P)
-	ss2.SetIndices(ids)
-	ss2.SetSession(&sess2)
-	if err := ss2.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("server2 lagrange failed: %v", err)
-	}
-
-	// Inizializzazione Participant Signers freschi per Sessione 2
-	ps1Sess2 := initParticipantSigner(t, "P1-S2", p1, P, ids, &sess2)
-	ps2Sess2 := initParticipantSigner(t, "P2-S2", p2, P, ids, &sess2)
-
-	// Generazione dei nonce freschi e regolari per la Sessione 2
-	nonceServer2 := makeServerNonce(t, ss2)
-	nonceP1S2 := makeParticipantNonce(t, ps1Sess2)
-	nonceP2S2 := makeParticipantNonce(t, ps2Sess2)
-
-	allM2Sess2 := []crypto.MaterialToSend2{
-		makeMaterial2(t, nonceServer2),
-		makeMaterial2(t, nonceP1S2),
-		makeMaterial2(t, nonceP2S2),
-	}
-	logOK(t, "Collected all fresh public nonces for Session 2")
-
-	if err := ss2.SetR(allM2Sess2); err != nil {
-		t.Fatalf("Server SetR failed: %v", err)
-	}
-	if err := ps1Sess2.SetR(allM2Sess2); err != nil {
-		t.Fatalf("P1 SetR failed: %v", err)
-	}
-	if err := ps2Sess2.SetR(allM2Sess2); err != nil {
-		t.Fatalf("P2 SetR failed: %v", err)
-	}
-
-	// -------------------------------------------------------------------------
-	// Generazione delle Firme Parziali
-	// -------------------------------------------------------------------------
-	logSection(t, "4. Partial Signature Generation and Attack Injection")
-
-	if err := ss2.SetPartialSignature(msg2); err != nil {
-		t.Fatalf("server2 partial signature failed: %v", err)
-	}
-	if err := ps1Sess2.SetPartialSignature(msg2); err != nil {
-		t.Fatalf("ps1Sess2 partial signature failed: %v", err)
-	}
-	if err := ps2Sess2.SetPartialSignature(msg2); err != nil {
-		t.Fatalf("ps2Sess2 partial signature failed: %v", err)
-	}
-
-	// ATTACCO: Estraiamo la firma parziale strutturalmente valida di P1
-	// e alteriamo il suo scalare Z per simulare il riutilizzo del nonce (mismatch algebrico)
-	roguePartial := ps1Sess2.GetPartialSignature()
-	roguePartial.Z.Add(&roguePartial.Z, &crypto.One)
-	logOK(t, "P1 partial signature altered to simulate rogue-nonce algebraic mismatch")
-
-	// Costruiamo il vettore delle firme parziali da passare alla combinazione
-	partialsSess2 := []crypto.PartialSignature{
-		ss2.GetPartialSignature(),
-		roguePartial, // Firma parziale corrotta dall'attacco
-		ps2Sess2.GetPartialSignature(),
-	}
-
-	// -------------------------------------------------------------------------
-	// Combinazione e Verifica Finale
-	// -------------------------------------------------------------------------
-	logSection(t, "5. Combination and Final Verification")
-
-	if err := ss2.CombineSignature(partialsSess2); err != nil {
-		t.Fatalf("CombineSignature failed unexpectedly: %v", err)
-	}
-	logOK(t, "CombineSignature accepted the structurally valid partial signature vector")
-
-	sig2 := ss2.GetSignature()
-	valid, err := crypto.VerifySignature(P, msg2, sig2, sess2)
-	if err != nil {
-		t.Fatalf("VerifySignature returned unexpected error: %v", err)
-	}
-
-	if valid {
-		t.Fatalf("CRITICAL SECURITY FLAW: Signature is valid under rogue-nonce mismatch attack!")
-	}
-
-	logOK(t, "Final verification rejected the signature containing the rogue-nonce anomaly")
-	logOK(t, "Rogue-Nonce reuse attack successfully blocked")
-}
-
-// Test 6
-// deve failare
+// Test 5: TestDuplicateParticipantIDsRejected verifies that a duplicate participant
+// ID in the signing set is detected and rejected, preventing malformed threshold
+// configurations from entering the protocol.
 func TestDuplicateParticipantIDsRejected(t *testing.T) {
 	logSection(t, "Security Test: Duplicate Participant IDs in Signing Set")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
+
 	logSection(t, "1. Dealer setup")
 
 	dealer := new(crypto.Dealer)
@@ -1389,21 +1196,18 @@ func TestDuplicateParticipantIDsRejected(t *testing.T) {
 
 	logOK(t, "Public key P = secret * G computed")
 
-	// -------------------------------------------------------------------------
-	// Malicious signing set with duplicate IDs
-	// -------------------------------------------------------------------------
-	logSection(t, "2. Malicious duplicate-ID signing set")
+	// Define invalid signing set containing duplicate participant IDs.
 
-	// Il partecipante duplicato 1 appare due volte.
-	// Questo deve essere intercettato immediatamente dalle funzioni SetIndices.
+	logSection(t, "2. Invalid duplicate-ID signing set")
+
+	// Inject malformed signing set containing duplicate identities.
 	ids := []crypto.ParticipantID{1, 1, 3}
 
 	logOK(t, fmt.Sprintf("Injected malicious signing set with duplicate IDs: %v", ids))
 
-	// -------------------------------------------------------------------------
-	// Session setup
-	// -------------------------------------------------------------------------
-	logSection(t, "3. Session initialization (Early Rejection Test)")
+	// Session reject invalid signing set during index validation.
+
+	logSection(t, "3. Session initialization")
 
 	var sess crypto.Session
 
@@ -1411,19 +1215,16 @@ func TestDuplicateParticipantIDsRejected(t *testing.T) {
 		t.Fatalf("failed session ID: %v", err)
 	}
 
-	// Primo controllo: la sessione deve rifiutare i duplicati
 	errSession := sess.SetIndices(ids)
 	if errSession == nil {
-		t.Fatalf("CRITICAL SECURITY FLAW: session.SetIndices accepted duplicate participant IDs")
+		t.Fatalf("session.SetIndices accepted duplicate participant IDs")
 	}
 	logOK(t, fmt.Sprintf("Session correctly rejected duplicate IDs with error: %v", errSession))
 
 	sess.SetIndexHash(ids)
 
-	// -------------------------------------------------------------------------
-	// Server signer initialization
-	// -------------------------------------------------------------------------
-	logSection(t, "4. Server signer validation (Early Rejection Test)")
+	// Server validates and rejects duplicate IDs.
+	logSection(t, "4. Server signer validation")
 
 	server := new(crypto.Server)
 	server.SetShare(dealer.GetServerShare())
@@ -1435,260 +1236,28 @@ func TestDuplicateParticipantIDsRejected(t *testing.T) {
 	ss.SetServer(*server)
 	ss.SetP(P)
 
-	// Secondo controllo: anche il ServerSigner deve rifiutare i duplicati
 	errServer := ss.SetIndices(ids)
 	if errServer == nil {
-		t.Fatalf("CRITICAL SECURITY FLAW: serverSigner.SetIndices accepted duplicate participant IDs")
+		t.Fatalf("serverSigner.SetIndices accepted duplicate participant IDs")
 	}
 	logOK(t, fmt.Sprintf("ServerSigner correctly rejected duplicate IDs with error: %v", errServer))
 
 	ss.SetSession(&sess)
 
-	// -------------------------------------------------------------------------
-	// Security expectation
-	// -------------------------------------------------------------------------
-	logSection(t, "5. Security expectation summary")
-	logOK(t, "Duplicate participant IDs are now proactively blocked at the entrance of the protocol")
+	logOK(t, "Duplicate participant IDs are rejected at input validation stage")
 }
 
-// Test 7: ampliamento del test 6. il sistema non si rende subito conto dell'id duplicato
-// ma se ne rendo conto in combine signature. ci accontentiamo? secondo chat è ok a livello
-// di sicurezza ma a livello di "best practice protocol design" questo non basterebbe...
-func TestDuplicateParticipantIDsProduceInvalidSignature(t *testing.T) {
-	logSection(t, "Security Test: Duplicate Participant IDs Through Full Signing Flow")
-
-	n := 5
-	k := 3
-
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
-	logSection(t, "1. Dealer setup")
-
-	dealer := new(crypto.Dealer)
-
-	if err := dealer.SetTsParameters(n, k); err != nil {
-		t.Fatalf("failed params: %v", err)
-	}
-
-	if err := dealer.SetSecret(); err != nil {
-		t.Fatalf("failed secret generation: %v", err)
-	}
-
-	friends := []string{"A", "B", "C", "D", "E"}
-	if err := dealer.SetFriends(friends); err != nil {
-		t.Fatalf("failed friends setup: %v", err)
-	}
-
-	if err := dealer.SetCommAndShares(); err != nil {
-		t.Fatalf("failed shares generation: %v", err)
-	}
-
-	logOK(t, "Dealer generated valid commitments and shares")
-
-	secret := dealer.GetSecret()
-
-	var P crypto.Point
-	P.ScalarBaseMult(&secret)
-
-	logOK(t, "Public key P = secret * G computed")
-
-	// -------------------------------------------------------------------------
-	// Malicious signing set with duplicate participant ID
-	// -------------------------------------------------------------------------
-	logSection(t, "2. Malicious duplicate signing set")
-
-	// P1 appears twice
-	ids := []crypto.ParticipantID{1, 1, 3}
-
-	logOK(t, fmt.Sprintf("Injected duplicate participant IDs: %v", ids))
-
-	msg := []byte("duplicate-id attack test")
-
-	// -------------------------------------------------------------------------
-	// Participant setup
-	// -------------------------------------------------------------------------
-	logSection(t, "3. Participant share verification")
-
-	// Honest shares from dealer
-	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
-	p3 := checkShareConsistency(t, "P3", 3, 2, dealer)
-
-	logOK(t, "Underlying participant shares are individually valid")
-
-	// -------------------------------------------------------------------------
-	// Session setup
-	// -------------------------------------------------------------------------
-	logSection(t, "4. Session initialization")
-
-	var sess crypto.Session
-
-	if err := sess.SetID(testSessionID(0xDD)); err != nil {
-		t.Fatalf("failed session ID: %v", err)
-	}
-
-	if err := sess.SetIndices(ids); err != nil {
-		logOK(t, fmt.Sprintf("Session rejected duplicated participant indices early: %v", err))
-		return
-	}
-	sess.SetIndexHash(ids)
-
-	logOK(t, "Session initialized with duplicated participant indices")
-
-	// -------------------------------------------------------------------------
-	// Server signer setup
-	// -------------------------------------------------------------------------
-	logSection(t, "5. Server signer initialization")
-
-	server := new(crypto.Server)
-	server.SetShare(dealer.GetServerShare())
-
-	aux := dealer.GetTsParameters()
-	server.SetParams(&aux)
-
-	ss := new(crypto.ServerSigner)
-
-	ss.SetServer(*server)
-	ss.SetP(P)
-	ss.SetIndices(ids)
-	ss.SetSession(&sess)
-
-	if err := ss.SetLagrangeCoefficient(); err != nil {
-		logOK(t, fmt.Sprintf("Duplicate IDs rejected during server Lagrange computation: %v", err))
-		return
-	}
-
-	logOK(t, "Server accepted duplicate IDs structurally")
-
-	// -------------------------------------------------------------------------
-	// Participant signers
-	// -------------------------------------------------------------------------
-	logSection(t, "6. Participant signer initialization")
-
-	// Two signer objects both representing participant 1
-	ps1a := initParticipantSigner(t, "P1-A", p1, P, ids, &sess)
-	ps1b := initParticipantSigner(t, "P1-B", p1, P, ids, &sess)
-
-	ps3 := initParticipantSigner(t, "P3", p3, P, ids, &sess)
-
-	logOK(t, "Duplicate signer identities initialized")
-
-	// -------------------------------------------------------------------------
-	// Nonce generation
-	// -------------------------------------------------------------------------
-	logSection(t, "7. Nonce generation")
-
-	nonceServer := makeServerNonce(t, ss)
-
-	nonce1a := makeParticipantNonce(t, ps1a)
-	nonce1b := makeParticipantNonce(t, ps1b)
-
-	nonce3 := makeParticipantNonce(t, ps3)
-
-	allM2 := []crypto.MaterialToSend2{
-		makeMaterial2(t, nonceServer),
-		makeMaterial2(t, nonce1a),
-		makeMaterial2(t, nonce1b),
-		makeMaterial2(t, nonce3),
-	}
-
-	logOK(t, "Collected nonce openings from server + duplicated P1 + P3")
-
-	// -------------------------------------------------------------------------
-	// Aggregate nonce
-	// -------------------------------------------------------------------------
-	logSection(t, "8. Aggregate nonce computation")
-
-	if err := ss.SetR(allM2); err != nil {
-		t.Fatalf("server SetR failed: %v", err)
-	}
-
-	if err := ps1a.SetR(allM2); err != nil {
-		t.Fatalf("P1-A SetR failed: %v", err)
-	}
-
-	if err := ps1b.SetR(allM2); err != nil {
-		t.Fatalf("P1-B SetR failed: %v", err)
-	}
-
-	if err := ps3.SetR(allM2); err != nil {
-		t.Fatalf("P3 SetR failed: %v", err)
-	}
-
-	logOK(t, "All parties computed aggregate nonce")
-
-	// -------------------------------------------------------------------------
-	// Partial signatures
-	// -------------------------------------------------------------------------
-	logSection(t, "9. Partial signature generation")
-
-	if err := ss.SetPartialSignature(msg); err != nil {
-		t.Fatalf("server partial failed: %v", err)
-	}
-
-	if err := ps1a.SetPartialSignature(msg); err != nil {
-		t.Fatalf("P1-A partial failed: %v", err)
-	}
-
-	if err := ps1b.SetPartialSignature(msg); err != nil {
-		t.Fatalf("P1-B partial failed: %v", err)
-	}
-
-	if err := ps3.SetPartialSignature(msg); err != nil {
-		t.Fatalf("P3 partial failed: %v", err)
-	}
-
-	logOK(t, "All partial signatures generated, including duplicate participant")
-
-	// -------------------------------------------------------------------------
-	// Combine signature
-	// -------------------------------------------------------------------------
-	logSection(t, "10. Final signature combination")
-
-	partials := []crypto.PartialSignature{
-		ss.GetPartialSignature(),
-		ps1a.GetPartialSignature(),
-		ps1b.GetPartialSignature(),
-		ps3.GetPartialSignature(),
-	}
-
-	if err := ss.CombineSignature(partials); err != nil {
-		logOK(t, fmt.Sprintf("CombineSignature rejected malformed duplicate set: %v", err))
-		return
-	}
-
-	logOK(t, "CombineSignature structurally accepted duplicate participant set")
-
-	sig := ss.GetSignature()
-
-	// -------------------------------------------------------------------------
-	// Final verification
-	// -------------------------------------------------------------------------
-	logSection(t, "11. Final verification")
-
-	valid, err := crypto.VerifySignature(P, msg, sig, sess)
-	if err != nil {
-		t.Fatalf("VerifySignature returned unexpected error: %v", err)
-	}
-
-	if valid {
-		t.Fatalf("CRITICAL SECURITY FLAW: duplicate participant IDs produced a valid final signature")
-	}
-
-	logOK(t, "Final verification rejected duplicate-ID forged signature")
-	logOK(t, "Duplicate participant ID attack failed safely")
-}
-
-// Test 8
+// Test 6: TestKParticipantsWithoutServerFails verifies that a threshold signing
+// attempt fails when only k participants contribute without the server.
 func TestKParticipantsWithoutServerFails(t *testing.T) {
 	logSection(t, "Security Test: k Participants WITHOUT Server (Must Fail)")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
+
 	logSection(t, "1. Dealer setup")
 
 	dealer := new(crypto.Dealer)
@@ -1715,14 +1284,13 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 
 	logOK(t, "Dealer initialized and public key computed")
 
-	// -------------------------------------------------------------------------
-	// Select k participants (NO server)
-	// -------------------------------------------------------------------------
+	// Define the signing set.
+
 	logSection(t, "2. Selecting k participants (NO server)")
 
-	ids := []crypto.ParticipantID{1, 2, 3} // k = 3
+	ids := []crypto.ParticipantID{1, 2, 3}
 
-	logOK(t, "Signing set contains ONLY participants (server omitted)")
+	logOK(t, "Signing set contains only participants")
 
 	var sess crypto.Session
 	if err := sess.SetID(testSessionID(0xAA)); err != nil {
@@ -1734,10 +1302,9 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 
 	logOK(t, "Session initialized without server node")
 
-	// -------------------------------------------------------------------------
-	// Initialize server signer BUT DO NOT USE IT
-	// -------------------------------------------------------------------------
-	logSection(t, "3. Server intentionally omitted from protocol")
+	// Initialize server signer but it will not be used in nonce or signature phase.
+
+	logSection(t, "3. Server intentionally excluded from signing protocol")
 
 	server := new(crypto.Server)
 	server.SetShare(dealer.GetServerShare())
@@ -1754,11 +1321,10 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 		t.Fatalf("lagrange failed: %v", err)
 	}
 
-	logOK(t, "Server signer exists but will NOT contribute (attack model)")
+	logOK(t, "Server signer exists but will not contribute")
 
-	// -------------------------------------------------------------------------
-	// Participant setup
-	// -------------------------------------------------------------------------
+	// Initialize participants.
+
 	logSection(t, "4. Participant setup")
 
 	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
@@ -1769,9 +1335,6 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 	ps2 := initParticipantSigner(t, "P2", p2, P, ids, &sess)
 	ps3 := initParticipantSigner(t, "P3", p3, P, ids, &sess)
 
-	// -------------------------------------------------------------------------
-	// Nonce generation (ONLY participants, NO server nonce)
-	// -------------------------------------------------------------------------
 	logSection(t, "5. Nonce generation without server")
 
 	nonce1 := makeParticipantNonce(t, ps1)
@@ -1794,12 +1357,11 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 		t.Fatalf("ps3 SetR failed: %v", err)
 	}
 
-	logOK(t, "Aggregate nonce computed WITHOUT server contribution")
+	logOK(t, "Aggregate nonce derived without server contribution")
 
-	// -------------------------------------------------------------------------
-	// Partial signatures (ONLY participants)
-	// -------------------------------------------------------------------------
-	logSection(t, "6. Partial signatures WITHOUT server")
+	// Participants generate partial signatures normally
+
+	logSection(t, "6. Partial signatures without server")
 
 	msg := []byte("test message")
 
@@ -1819,12 +1381,11 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 		ps3.GetPartialSignature(),
 	}
 
-	logOK(t, "Collected k partial signatures WITHOUT server")
+	logOK(t, "Collected k partial signatures without server")
 
-	// -------------------------------------------------------------------------
-	// Combine + EXPECT FAILURE
-	// -------------------------------------------------------------------------
-	logSection(t, "7. CombineSignature (EXPECTED TO FAIL OR PRODUCE INVALID SIGNATURE)")
+	// Attempt to combine partial signatures.
+
+	logSection(t, "7. CombineSignature: expected to fail")
 
 	err := ss.CombineSignature(partials)
 
@@ -1837,23 +1398,24 @@ func TestKParticipantsWithoutServerFails(t *testing.T) {
 		}
 
 		if valid {
-			t.Fatalf("SECURITY FAILURE: signature valid without server")
+			t.Fatalf("signature valid without server")
 		}
 	}
 
-	logOK(t, "Correctly rejected signing attempt without server")
+	logOK(t, "Signing attempt rejected due to missing server contribution")
 }
 
-// Test 9
+// Test 7: TestKParticipantsWithoutServerFails verifies that a threshold signing
+// attempt fails when server and only k-1 participants contribute.
 func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
-	logSection(t, "Security Test: Server + (k-1) Participants MUST Fail")
+	logSection(t, "Security Test: Server + (k-1) Participants must fail")
 
 	n := 5
-	k := 3 // threshold participants required = 3
+	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
+
 	logSection(t, "1. Dealer setup")
 
 	dealer := new(crypto.Dealer)
@@ -1880,12 +1442,11 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 
 	logOK(t, "Dealer initialized and public key computed")
 
-	// -------------------------------------------------------------------------
-	// Select k-1 participants ONLY
-	// -------------------------------------------------------------------------
-	logSection(t, "2. Selecting k-1 participants + server")
+	// Define signing set with k-1 participant and initialize session.
 
-	ids := []crypto.ParticipantID{1, 2} // k-1 = 2 (k=3)
+	logSection(t, "2. Selecting k-1 participants")
+
+	ids := []crypto.ParticipantID{1, 2}
 
 	var sess crypto.Session
 	if err := sess.SetID(testSessionID(0xDE)); err != nil {
@@ -1897,9 +1458,8 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 
 	logOK(t, "Session initialized with insufficient participant set")
 
-	// -------------------------------------------------------------------------
-	// Server setup (IMPORTANT: included)
-	// -------------------------------------------------------------------------
+	// Initialize Server signer.
+
 	logSection(t, "3. Server setup (included)")
 
 	server := new(crypto.Server)
@@ -1920,9 +1480,8 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 
 	logOK(t, "Server signer initialized")
 
-	// -------------------------------------------------------------------------
-	// Participants setup (ONLY k-1)
-	// -------------------------------------------------------------------------
+	// Initialize k-1 participants.
+
 	logSection(t, "4. Participant setup (k-1 only)")
 
 	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
@@ -1931,9 +1490,6 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 	ps1 := initParticipantSigner(t, "P1", p1, P, ids, &sess)
 	ps2 := initParticipantSigner(t, "P2", p2, P, ids, &sess)
 
-	// -------------------------------------------------------------------------
-	// Nonce generation (server + k-1 participants)
-	// -------------------------------------------------------------------------
 	logSection(t, "5. Nonce generation")
 
 	nonceServer := makeServerNonce(t, ss)
@@ -1956,11 +1512,10 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 		t.Fatalf("ps2 SetR failed: %v", err)
 	}
 
-	logOK(t, "Aggregate nonce computed with insufficient participants")
+	logOK(t, "Aggregate nonce derived with insufficient participants")
 
-	// -------------------------------------------------------------------------
-	// Partial signatures
-	// -------------------------------------------------------------------------
+	// Generate partial signatures of server and k-1 participants.
+
 	logSection(t, "6. Partial signatures")
 
 	msg := []byte("test message k-1")
@@ -1981,9 +1536,8 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 		ps2.GetPartialSignature(),
 	}
 
-	// -------------------------------------------------------------------------
-	// Combine + MUST FAIL
-	// -------------------------------------------------------------------------
+	// Attempt to combine partial signatures.
+
 	logSection(t, "7. Combine + final verification")
 
 	err := ss.CombineSignature(partials)
@@ -2001,22 +1555,23 @@ func TestServerWithKMinus1ParticipantsFails(t *testing.T) {
 	}
 
 	if valid {
-		t.Fatalf("SECURITY FAILURE: signature valid with only k-1 participants + server")
+		t.Fatalf("signature valid with only k-1 participants + server")
 	}
 
 	logOK(t, "Signature correctly invalid with insufficient threshold")
 }
 
-// Test 10
+// Test 8: TestWrongParticipantIndexShareMismatch verifies that a participant cannot
+// use a share not intended for its assigned ID.
 func TestWrongParticipantIndexShareMismatch(t *testing.T) {
 	logSection(t, "Security Test: Wrong Participant Index / Share Mismatch")
 
 	n := 5
 	k := 3
 
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
+	// Dealer generates the secret, distributes shares, and publishes
+	// commitment for verifiable secret sharing.
+
 	logSection(t, "1. Dealer setup")
 
 	dealer := new(crypto.Dealer)
@@ -2039,23 +1594,23 @@ func TestWrongParticipantIndexShareMismatch(t *testing.T) {
 
 	logOK(t, "Dealer initialized and shares generated")
 
-	// -------------------------------------------------------------------------
-	// Extract valid share
-	// -------------------------------------------------------------------------
+	// Extract a valid share (P1).
+
 	logSection(t, "2. Extract valid share")
 
-	validShare := dealer.GetParticipantShares(0) // share of P1
+	validShare := dealer.GetParticipantShares(0)
 
 	logOK(t, "Valid share of P1 extracted")
 
-	// -------------------------------------------------------------------------
-	// Malicious participant creation
-	// -------------------------------------------------------------------------
+	// Inject mismatch between participant ID and share.
+
 	logSection(t, "3. Inject mismatch (ID vs share)")
 
 	p := new(crypto.Participant)
 
-	// IMPORTANT: wrong ID
+	// Simulate a malicious mismatch between participant identity
+	// and assigned share.
+
 	if err := p.SetID(3); err != nil {
 		t.Fatalf("failed to set ID: %v", err)
 	}
@@ -2064,16 +1619,16 @@ func TestWrongParticipantIndexShareMismatch(t *testing.T) {
 		t.Fatalf("failed to set participant name: %v", err)
 	}
 
-	// BUT share of P1
+	// Assign mismatched share.
+
 	if err := p.SetShare(validShare); err != nil {
 		t.Fatalf("failed to set mismatched share: %v", err)
 	}
 
 	logOK(t, "P3 uses P1's share (mismatch injected)")
 
-	// -------------------------------------------------------------------------
-	// Verification against commitment
-	// -------------------------------------------------------------------------
+	// Verify consistency of the share.
+
 	logSection(t, "4. VSS consistency check")
 
 	ok, err := p.VerifyConsistency(*dealer.GetComm())
@@ -2082,205 +1637,8 @@ func TestWrongParticipantIndexShareMismatch(t *testing.T) {
 	}
 
 	if ok {
-		t.Fatalf("SECURITY FAILURE: mismatched share accepted (ID/share mismatch)")
+		t.Fatalf("mismatched share accepted (ID/share mismatch)")
 	}
 
 	logOK(t, "Mismatch correctly rejected by VSS verification")
-}
-
-// Test 11
-func TestWeightedSharesReconstructDealerSecret(t *testing.T) {
-	logSection(t, "LSSS Reconstruction Test: Weighted Shares Reconstruct Dealer Secret")
-
-	n := 5
-	k := 3
-
-	// -------------------------------------------------------------------------
-	// Dealer setup
-	// -------------------------------------------------------------------------
-	logSection(t, "1. Dealer setup")
-
-	dealer := new(crypto.Dealer)
-
-	if err := dealer.SetTsParameters(n, k); err != nil {
-		t.Fatalf("failed to set threshold parameters: %v", err)
-	}
-	logOK(t, fmt.Sprintf("Threshold parameters set: n = %d, k = %d", n, k))
-
-	if err := dealer.SetSecret(); err != nil {
-		t.Fatalf("failed to generate dealer secret: %v", err)
-	}
-	logOK(t, "Dealer secret generated")
-
-	friends := []string{"A", "B", "C", "D", "E"}
-	if err := dealer.SetFriends(friends); err != nil {
-		t.Fatalf("failed to set friends: %v", err)
-	}
-	logOK(t, fmt.Sprintf("Participants registered by dealer: %v", friends))
-
-	if err := dealer.SetCommAndShares(); err != nil {
-		t.Fatalf("failed to generate commitments and shares: %v", err)
-	}
-	logOK(t, "Dealer generated VSS commitments, participant shares, and server share")
-
-	secret := dealer.GetSecret()
-	logOK(t, "Dealer secret retrieved for reconstruction check")
-
-	var P crypto.Point
-	P.ScalarBaseMult(&secret)
-	logOK(t, "Public key P = secret * G computed")
-
-	// -------------------------------------------------------------------------
-	// Authorized reconstruction set
-	// -------------------------------------------------------------------------
-	logSection(t, "2. Authorized reconstruction set")
-
-	// IMPORTANT:
-	// indices contains only participant IDs.
-	// ServerID is handled separately by the protocol.
-	ids := []crypto.ParticipantID{1, 3, 4}
-
-	logOK(t, fmt.Sprintf("Selected participant indices: %v", ids))
-	logOK(t, "ServerID is not included in indices and is handled separately")
-
-	// -------------------------------------------------------------------------
-	// Session setup
-	// -------------------------------------------------------------------------
-	logSection(t, "3. Session setup")
-
-	var sess crypto.Session
-
-	if err := sess.SetID(testSessionID(0x51)); err != nil {
-		t.Fatalf("failed to set session ID: %v", err)
-	}
-	logOK(t, fmt.Sprintf("Session ID set: %x", sess.GetID()))
-
-	if err := sess.SetIndices(ids); err != nil {
-		t.Fatalf("failed to set session indices: %v", err)
-	}
-	sess.SetIndexHash(ids)
-
-	logOK(t, "Session indices and index hash set")
-
-	// -------------------------------------------------------------------------
-	// Server setup
-	// -------------------------------------------------------------------------
-	logSection(t, "4. Server setup")
-
-	server := new(crypto.Server)
-
-	server.SetShare(dealer.GetServerShare())
-	logOK(t, "Server share assigned")
-
-	aux := dealer.GetTsParameters()
-	server.SetParams(&aux)
-	logOK(t, "Threshold parameters assigned to server")
-
-	ss := new(crypto.ServerSigner)
-
-	ss.SetServer(*server)
-	ss.SetP(P)
-
-	if err := ss.SetIndices(ids); err != nil {
-		t.Fatalf("failed to set server signer indices: %v", err)
-	}
-	ss.SetSession(&sess)
-
-	if err := ss.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("failed to compute server Lagrange coefficient: %v", err)
-	}
-	logOK(t, "Server Lagrange coefficient computed")
-
-	// -------------------------------------------------------------------------
-	// Participant setup and VSS verification
-	// -------------------------------------------------------------------------
-	logSection(t, "5. Participant setup and VSS verification")
-
-	p1 := checkShareConsistency(t, "P1", 1, 0, dealer)
-	p3 := checkShareConsistency(t, "P3", 3, 2, dealer)
-	p4 := checkShareConsistency(t, "P4", 4, 3, dealer)
-
-	logOK(t, "All selected participant shares passed VSS consistency verification")
-
-	ps1 := initParticipantSigner(t, "P1", p1, P, ids, &sess)
-	ps3 := initParticipantSigner(t, "P3", p3, P, ids, &sess)
-	ps4 := initParticipantSigner(t, "P4", p4, P, ids, &sess)
-
-	logOK(t, "All participant Lagrange coefficients computed")
-
-	// -------------------------------------------------------------------------
-	// Weighted reconstruction
-	// -------------------------------------------------------------------------
-	logSection(t, "6. Weighted reconstruction")
-
-	lambdaServer := ss.GetLagrangeCoefficient()
-	lambda1 := ps1.GetLagrangeCoefficient()
-	lambda3 := ps3.GetLagrangeCoefficient()
-	lambda4 := ps4.GetLagrangeCoefficient()
-
-	serverFromSigner := ss.GetServer()
-	shareServer := serverFromSigner.GetShare()
-
-	participant1 := ps1.GetParticipant()
-	share1 := participant1.GetShare()
-
-	participant3 := ps3.GetParticipant()
-	share3 := participant3.GetShare()
-
-	participant4 := ps4.GetParticipant()
-	share4 := participant4.GetShare()
-
-	var rec crypto.Scalar
-	var tmp crypto.Scalar
-
-	tmp.Multiply(&lambdaServer, &shareServer)
-	rec.Add(&rec, &tmp)
-	logOK(t, "Added lambda_server * share_server")
-
-	tmp.Multiply(&lambda1, &share1)
-	rec.Add(&rec, &tmp)
-	logOK(t, "Added lambda_1 * share_1")
-
-	tmp.Multiply(&lambda3, &share3)
-	rec.Add(&rec, &tmp)
-	logOK(t, "Added lambda_3 * share_3")
-
-	tmp.Multiply(&lambda4, &share4)
-	rec.Add(&rec, &tmp)
-	logOK(t, "Added lambda_4 * share_4")
-
-	// -------------------------------------------------------------------------
-	// Secret equality check
-	// -------------------------------------------------------------------------
-	logSection(t, "7. Secret equality check")
-
-	if rec.Equal(&secret) != 1 {
-		t.Fatalf("weighted reconstruction does NOT match the dealer secret")
-	}
-
-	logOK(t, "Weighted reconstruction matches the original dealer secret")
-
-	// -------------------------------------------------------------------------
-	// Public key sanity check
-	// -------------------------------------------------------------------------
-	logSection(t, "8. Public key sanity check")
-
-	var recP crypto.Point
-	recP.ScalarBaseMult(&rec)
-
-	var secretP crypto.Point
-	secretP.ScalarBaseMult(&secret)
-
-	if recP.Equal(&secretP) != 1 {
-		t.Fatalf("reconstructed scalar does not produce the same public key")
-	}
-
-	logOK(t, "Reconstructed scalar produces the same public key as the dealer secret")
-
-	if P.Equal(&secretP) != 1 {
-		t.Fatalf("dealer public key does not match secret-derived public key")
-	}
-
-	logOK(t, "Dealer public key matches the public key derived from the secret")
-	logOK(t, "LSSS weighted shares reconstruct the secret correctly")
 }
