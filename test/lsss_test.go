@@ -158,7 +158,7 @@ func initParticipantSigner(
 	}
 
 	if err := ps.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("failed to set %s Lagrange coefficient: %v", name, err)
+		t.Fatalf("failed to set %s signing coefficient: %v", name, err)
 	}
 
 	logOK(t, name+" signer initialized")
@@ -166,7 +166,8 @@ func initParticipantSigner(
 	return ps
 }
 
-// verifyNonceFromParticipant verifies a participant's nonce commitment (server-side) using M1 and M2.
+// verifyNonceFromParticipant verifies a participant's nonce commitment
+// (server-side) using MaterialToSend1 and MaterialToSend2.
 func verifyNonceFromParticipant(
 	t *testing.T,
 	server *crypto.ServerSigner,
@@ -284,9 +285,9 @@ func TestLSSSFullSigningFlow(t *testing.T) {
 	ServerS.SetSession(&sess)
 
 	if err := ServerS.SetLagrangeCoefficient(); err != nil {
-		t.Fatalf("failed to set server Lagrange coefficient: %v", err)
+		t.Fatalf("failed to set server signing coefficient: %v", err)
 	}
-	logOK(t, "Server Lagrange coefficient computed")
+	logOK(t, "Server signing coefficient computed")
 
 	PinoS := initParticipantSigner(t, "Pino", Pino, P, ids, &sess)
 	GianniS := initParticipantSigner(t, "Gianni", Gianni, P, ids, &sess)
@@ -723,7 +724,7 @@ func TestTamperedPartialSignature(t *testing.T) {
 	if err := ss.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server lagrange failed: %v", err)
 	}
-	logOK(t, "Server signer initialized and server Lagrange coefficient computed")
+	logOK(t, "Server signer initialized and server signing coefficient computed")
 
 	// Participants verify share consistency with the dealer commitment.
 	logSection(t, "3. Share consistency verification")
@@ -795,7 +796,8 @@ func TestTamperedPartialSignature(t *testing.T) {
 	}
 	logOK(t, "P2 computed its honest partial signature")
 
-	// One partial signature is tampered before combination.
+	// Simulate adversarial tampering of one valid partial signature
+	// before threshold aggregation.
 
 	logSection(t, "6. Tampering attack")
 
@@ -929,7 +931,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	if err := serverSigner1.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server1 lagrange failed: %v", err)
 	}
-	logOK(t, "Session 1 server signer initialized and Lagrange coefficient computed")
+	logOK(t, "Session 1 server signer initialized and signing coefficient computed")
 
 	ps1Sess1 := initParticipantSigner(t, "P1-S1", p1, P, ids, &sess1)
 	ps3Sess1 := initParticipantSigner(t, "P3-S1", p3, P, ids, &sess1)
@@ -1038,7 +1040,7 @@ func TestReplayAttackDifferentSession(t *testing.T) {
 	if err := serverSigner2.SetLagrangeCoefficient(); err != nil {
 		t.Fatalf("server2 lagrange failed: %v", err)
 	}
-	logOK(t, "Session 2 server signer initialized and Lagrange coefficient computed")
+	logOK(t, "Session 2 server signer initialized and signing coefficient computed")
 
 	ps1Sess2 := initParticipantSigner(t, "P1-S2", p1, P, ids, &sess2)
 	ps3Sess2 := initParticipantSigner(t, "P3-S2", p3, P, ids, &sess2)
@@ -1198,7 +1200,7 @@ func TestDuplicateParticipantIDsRejected(t *testing.T) {
 
 	logSection(t, "2. Invalid duplicate-ID signing set")
 
-	// Participant 1 appears two times in ids.
+	// Inject malformed signing set containing duplicate identities.
 	ids := []crypto.ParticipantID{1, 1, 3}
 
 	logOK(t, fmt.Sprintf("Injected malicious signing set with duplicate IDs: %v", ids))
@@ -1606,7 +1608,8 @@ func TestWrongParticipantIndexShareMismatch(t *testing.T) {
 
 	p := new(crypto.Participant)
 
-	// Set ID = 3.
+	// Simulate a malicious mismatch between participant identity
+	// and assigned share.
 
 	if err := p.SetID(3); err != nil {
 		t.Fatalf("failed to set ID: %v", err)
