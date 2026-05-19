@@ -125,7 +125,11 @@ func (h *Handler) handleGetSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Make the server's partial signature and add it
-	foundSession.Signer.SetPartialSignature(foundSession.Message)
+	err = foundSession.Signer.SetPartialSignature(foundSession.Message)
+	if err != nil {
+		http.Error(w, "Failed to set partial signature", http.StatusInternalServerError)
+		return
+	}
 	serverPartialSig := foundSession.Signer.GetPartialSignature()
 
 	serverSigAdded := false
@@ -481,8 +485,16 @@ func (h *Handler) handleSetM1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var m1 crypto.MaterialToSend1
-	m1.SetIndex(idx)
-	m1.SetCommit(req.Ci)
+	err = m1.SetIndex(idx)
+	if err != nil {
+		http.Error(w, "Failed to set m1 index while rebulding m1", http.StatusInternalServerError)
+		return
+	}
+	err = m1.SetCommit(req.Ci)
+	if err != nil {
+		http.Error(w, "Failed to set m1 commit while rebulding m1", http.StatusInternalServerError)
+		return
+	}
 
 	foundSession.Materials1 = append(foundSession.Materials1, m1)
 	foundSession.Sorted = false
@@ -546,8 +558,16 @@ func (h *Handler) handleSetM2(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var m2 crypto.MaterialToSend2
-	m2.SetIndex(idx)
-	m2.SetRi(*Ri)
+	err = m2.SetIndex(idx)
+	if err != nil {
+		http.Error(w, "Failed to set m2 index while rebuilding m2", http.StatusInternalServerError)
+		return
+	}
+	err = m2.SetRi(*Ri)
+	if err != nil {
+		http.Error(w, "Failed to set m2 Ri while rebuilding m2", http.StatusInternalServerError)
+		return
+	}
 
 	foundSession.Materials2 = append(foundSession.Materials2, m2)
 	foundSession.Sorted = false
@@ -653,18 +673,28 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	if len(pending.Participants) >= pending.Threshold {
 		session := &crypto.Session{}
 
+		var err error
+		
 		// Signing session parameters are set
 		indices := append([]crypto.ParticipantID(nil), pending.Participants...)
 		slices.Sort(indices)
 
-		session.SetIndices(indices)
+		err = session.SetIndices(indices)
+		if err != nil {
+			http.Error(w, "Failed to set session indices", http.StatusInternalServerError)
+			return
+		}
 
 		if err := session.SetID(nil); err != nil {
 			http.Error(w, "Failed to generate session ID", http.StatusInternalServerError)
 			return
 		}
 
-		session.SetIndexHash(session.GetIndices())
+		err = session.SetIndexHash(session.GetIndices())
+		if err != nil {
+			http.Error(w, "Failed to session IndexHash", http.StatusInternalServerError)
+			return
+		}
 
 		var serverPart crypto.Server
 		share, err := new(crypto.Scalar).SetCanonicalBytes(wallet.ServerShare)
@@ -673,14 +703,34 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		serverPart.SetShare(*share)
-		serverPart.SetParams(&wallet.ThresholdParams)
+		err = serverPart.SetShare(*share)
+		if err != nil {
+			http.Error(w, "Failed to set server share", http.StatusInternalServerError)
+			return
+		}
+		err = serverPart.SetParams(&wallet.ThresholdParams)
+		if err != nil {
+			http.Error(w, "Failed to set server parameters", http.StatusInternalServerError)
+			return
+		}
 
 		var ss crypto.ServerSigner
 		ss.SetServer(serverPart)
-		ss.SetIndices(session.GetIndices())
-		ss.SetSession(session)
-		ss.SetLagrangeCoefficient()
+		err = ss.SetIndices(session.GetIndices())
+		if err != nil {
+			http.Error(w, "Failed to set signer indices", http.StatusInternalServerError)
+			return
+		}
+		err = ss.SetSession(session)
+		if err != nil {
+			http.Error(w, "Failed to set signer session", http.StatusInternalServerError)
+			return
+		}
+		err = ss.SetLagrangeCoefficient()
+		if err != nil {
+			http.Error(w, "Failed to set Lagrange coefficients", http.StatusInternalServerError)
+			return
+		}
 
 		point, err := new(crypto.Point).SetBytes(wallet.P)
 		if err != nil {
@@ -688,7 +738,11 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		ss.SetP(*point)
+		err = ss.SetP(*point)
+		if err != nil {
+			http.Error(w, "Failed to set signer public point", http.StatusInternalServerError)
+			return
+		}
 
 		var nonce crypto.NonceShare
 		if err := nonce.SetIndex(crypto.ServerID); err != nil {
@@ -706,8 +760,16 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		nonce.SetCommit(session)
-		ss.SetNonce(nonce)
+		err = nonce.SetCommit(session)
+		if err != nil {
+			http.Error(w, "Failed to set server nonce commit", http.StatusInternalServerError)
+			return
+		}
+		err = ss.SetNonce(nonce)
+		if err != nil {
+			http.Error(w, "Failed to set signer nonce", http.StatusInternalServerError)
+			return
+		}
 
 		ci, err := nonce.GetCommit()
 		if err != nil {
@@ -716,9 +778,21 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var m1 crypto.MaterialToSend1
-		m1.SetIndex(nonce.GetIndex())
-		m1.SetCommit(ci)
-		ss.SetMaterialToSend1(m1)
+		err = m1.SetIndex(nonce.GetIndex())
+		if err != nil {
+			http.Error(w, "Failed to set m1 index", http.StatusInternalServerError)
+			return
+		}
+		err = m1.SetCommit(ci)
+		if err != nil {
+			http.Error(w, "Failed to set m1 commit", http.StatusInternalServerError)
+			return
+		}
+		err = ss.SetMaterialToSend1(m1)
+		if err != nil {
+			http.Error(w, "Failed to set server m1", http.StatusInternalServerError)
+			return
+		}
 
 		Ri, err := nonce.GetRi()
 		if err != nil {
@@ -727,9 +801,21 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var m2 crypto.MaterialToSend2
-		m2.SetIndex(nonce.GetIndex())
-		m2.SetRi(*Ri)
-		ss.SetMaterialToSend2(m2)
+		err = m2.SetIndex(nonce.GetIndex())
+		if err != nil {
+			http.Error(w, "Failed to set m2 index", http.StatusInternalServerError)
+			return
+		}
+		err = m2.SetRi(*Ri)
+		if err != nil {
+			http.Error(w, "Failed to set m2 Ri", http.StatusInternalServerError)
+			return
+		}
+		err = ss.SetMaterialToSend2(m2)
+		if err != nil {
+			http.Error(w, "Failed to set server m2", http.StatusInternalServerError)
+			return
+		}
 
 		// Create session instance
 		signingSession := &SigningSession{

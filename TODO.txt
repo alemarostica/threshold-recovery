@@ -1,2 +1,1 @@
-- Handle errori dei Setter
-- Commentare
+- Add usage instructions and config details in report

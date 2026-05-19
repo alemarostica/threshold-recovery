@@ -81,8 +81,8 @@ func callAPI(method, path string, payload any, out any) error {
 // Use Argon2id to derive an encryption key from password
 // of course, password has to be decently strong
 func deriveKey(password []byte, salt []byte) []byte {
-	// OWASP suggests 3 iterations, 256MiB of memory, threads and 32 bytes of output length
-	return argon2.IDKey(password, salt, 3, 256*1024, 4, 32)
+	// Go docs actually suggest time 1 and memory 64*1024, bruh
+	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
 }
 
 // Take the in-memory DB and encrypt it with a argon2 derived key

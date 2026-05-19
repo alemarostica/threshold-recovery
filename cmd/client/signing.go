@@ -66,10 +66,20 @@ func InitializePartialSign(db *LocalDB) {
 		if resp.Status == "ready" {
 			fmt.Printf("\nThreshold reached, server confirmed session\n")
 
+			var err error
+			
 			// reconstruct data
 			var part crypto.Participant
-			part.SetID(crypto.ParticipantID(selected.Index))
-			part.SetName(selected.Username)
+			err = part.SetID(crypto.ParticipantID(selected.Index))
+			if err != nil {
+				fmt.Printf("Failed to set participant ID: %v\n", err)
+				return
+			}
+			err = part.SetName(selected.Username)
+			if err != nil {
+				fmt.Printf("Failed to set participant name: %v\n", err)
+				return
+			}
 
 			// All paramaters for the signing session are set
 			var shareScalar crypto.Scalar
@@ -77,24 +87,60 @@ func InitializePartialSign(db *LocalDB) {
 				fmt.Printf("Failed to load share scalar: %v\n", err)
 				return
 			}
-			part.SetShare(shareScalar)
+
+			err = part.SetShare(shareScalar)
+			if err != nil {
+				fmt.Printf("Failed to set participant share: %v\n", err)
+				return
+			}
 
 			var ps crypto.ParticipantSigner
-			ps.SetParticipant(&part)
-			ps.SetIndices(resp.VectorV)
-			ps.SetLagrangeCoefficient()
+			err = ps.SetParticipant(&part)
+			if err != nil {
+				fmt.Printf("Failed to set signer participant: %v\n", err)
+				return
+			}
+			err = ps.SetIndices(resp.VectorV)
+			if err != nil {
+				fmt.Printf("Failed to set signer indices: %v\n", err)
+				return
+			}
+			err = ps.SetLagrangeCoefficient()
+			if err != nil {
+				fmt.Printf("Failed to set Lagrange coefficients: %v\n", err)
+				return
+			}
+
+			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
+			
 			point, err := new(crypto.Point).SetBytes(resp.P)
 			if err != nil {
 				fmt.Printf("Failed to decode public key P: %v\n", err)
 				return
 			}
-			ps.SetP(*point)
-			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
+
+			err = ps.SetP(*point)
+			if err != nil {
+				fmt.Printf("Failed to public point: %v\n", err)
+				return
+			}
 
 			session := &crypto.Session{}
-			session.SetID(resp.SessionID)
-			session.SetIndices(resp.VectorV)
-			session.SetIndexHash(resp.VectorV)
+			err = session.SetID(resp.SessionID)
+			if err != nil {
+				fmt.Printf("Failed to set session ID: %v\n", err)
+				return
+			}
+			err = session.SetIndices(resp.VectorV)
+			if err != nil {
+				fmt.Printf("Failed to set session indices: %v\n", err)
+				return
+			}
+			err = session.SetIndexHash(resp.VectorV)
+			if err != nil {
+				fmt.Printf("Failed to set session IndexHash: %v\n", err)
+				return
+			}
 
 			if err := ps.SetSession(session); err != nil {
 				fmt.Printf("Failed to set session in signer: %v\n", err)
@@ -117,8 +163,16 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
-			nonce.SetCommit(session)
-			ps.SetN(nonce)
+			err = nonce.SetCommit(session)
+			if err != nil {
+				fmt.Printf("Failed to set nonce commit on session: %v\n", err)
+				return
+			}
+			err = ps.SetN(nonce)
+			if err != nil {
+				fmt.Printf("Failed to set signer nonce: %v\n", err)
+				return
+			}
 
 			ci, err := nonce.GetCommit()
 			if err != nil {
@@ -127,10 +181,22 @@ func InitializePartialSign(db *LocalDB) {
 			}
 
 			var m1 crypto.MaterialToSend1
-			m1.SetIndex(nonce.GetIndex())
-			m1.SetCommit(ci)
+			err = m1.SetIndex(nonce.GetIndex())
+			if err != nil {
+				fmt.Printf("Failed to m1 index: %v\n", err)
+				return
+			}
+			err = m1.SetCommit(ci)
+			if err != nil {
+				fmt.Printf("Failed to set m1 commit: %v\n", err)
+				return
+			}
 
-			ps.SetMaterialToSend1(m1)
+			err = ps.SetMaterialToSend1(m1)
+			if err != nil {
+				fmt.Printf("Failed to signer m1: %v\n", err)
+				return
+			}
 
 			// Client sends its MaterialToSend1
 			setM1Req := api.SetM1Request{
@@ -158,10 +224,22 @@ func InitializePartialSign(db *LocalDB) {
 			}
 
 			var m2 crypto.MaterialToSend2
-			m2.SetIndex(nonce.GetIndex())
-			m2.SetRi(*Ri)
+			err = m2.SetIndex(nonce.GetIndex())
+			if err != nil {
+				fmt.Printf("Failed to set m1 index: %v\n", err)
+				return
+			}
+			err = m2.SetRi(*Ri)
+			if err != nil {
+				fmt.Printf("Failed to m2 Ri: %v\n", err)
+				return
+			}
 
-			ps.SetMaterialToSend2(m2)
+			err = ps.SetMaterialToSend2(m2)
+			if err != nil {
+				fmt.Printf("Failed to signer m2: %v\n", err)
+				return
+			}
 
 			// Client now retrieves the full arrays of MaterialsToSend1 of all participants
 			getM1Req := api.GetM1Request{
@@ -190,8 +268,16 @@ func InitializePartialSign(db *LocalDB) {
 			var allM1 []crypto.MaterialToSend1
 			for _, m := range allM1resp.M1Array {
 				var m1 crypto.MaterialToSend1
-				m1.SetIndex(m.Index)
-				m1.SetCommit(m.Ci)
+				err = m1.SetIndex(m.Index)
+				if err != nil {
+					fmt.Printf("Failed to set m1 index while rebuilding allM1: %v\n", err)
+					return
+				}
+				err = m1.SetCommit(m.Ci)
+				if err != nil {
+					fmt.Printf("Failed to set m1 commit while rebulding allM1: %v\n", err)
+					return
+				}
 				allM1 = append(allM1, m1)
 			}
 
@@ -249,8 +335,16 @@ func InitializePartialSign(db *LocalDB) {
 				}
 
 				var m2 crypto.MaterialToSend2
-				m2.SetIndex(m.Index)
-				m2.SetRi(*Ri)
+				err = m2.SetIndex(m.Index)
+				if err != nil {
+					fmt.Printf("Failed to set m2 index while reconstructing allM2: %v\n", err)
+					return
+				}
+				err = m2.SetRi(*Ri)
+				if err != nil {
+					fmt.Printf("Failed to set m2 Ri while reconstructing allM2: %v\n", err)
+					return
+				}
 
 				allM2 = append(allM2, m2)
 			}
