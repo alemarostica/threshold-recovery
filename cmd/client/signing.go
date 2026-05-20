@@ -15,18 +15,19 @@ import (
 	"time"
 )
 
-// When a user wants to initialize signature recovery this function is called
+// Initializes the threshold signature recovery procedure.
 func InitializePartialSign(db *LocalDB) {
 	if len(db.ReceivedShares) == 0 {
 		fmt.Println("No shares found in local database.")
 		return
 	}
 
-	// Select share
+	// Display available shares stored locally.
 	fmt.Println("\nAvailable shares for recovery:")
 	for i, s := range db.ReceivedShares {
 		fmt.Printf("[%d] Wallet Owner: %s (Wallet Pub: %x)\n", i, s.Username, s.WalletPub)
 	}
+	// Select the share to use for recovery.
 	fmt.Print("Select share index: ")
 	idxStr := ReadInput(bufio.NewReader(os.Stdin))
 	idx, _ := strconv.Atoi(idxStr)
@@ -39,7 +40,7 @@ func InitializePartialSign(db *LocalDB) {
 
 	fmt.Println("Checking wallet status and joining recovery pool on server...")
 
-	// This request will be sent until the thresold has been reached on the server
+	// Build the signature initialization request.
 	initReq := api.SignInitRequest{
 		Requester:      db.MyIdentity.Name,
 		WalletPubKey:   selected.WalletPub,
@@ -53,7 +54,7 @@ func InitializePartialSign(db *LocalDB) {
 		Signature: ed25519.Sign(db.MyIdentity.PrivateKey, initBytes),
 	}
 
-	// unelegant polling
+	// Poll the server until the signing threshold is reached.
 	for {
 		var resp api.SignInitResponse
 		err := callAPI("POST", "/sign/init", signedInitReq, &resp)
@@ -62,13 +63,13 @@ func InitializePartialSign(db *LocalDB) {
 			return
 		}
 
-		// Server will respond with a different status based on whether the treshold has been reached or not
+		// Server confirms that enough participants joined the session.
 		if resp.Status == "ready" {
 			fmt.Printf("\nThreshold reached, server confirmed session\n")
 
 			var err error
-			
-			// reconstruct data
+
+			// Reconstruct participant data from the stored share
 			var part crypto.Participant
 			err = part.SetID(crypto.ParticipantID(selected.Index))
 			if err != nil {
@@ -81,7 +82,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
-			// All paramaters for the signing session are set
+			// Restore the scalar value associated with the participant share.
 			var shareScalar crypto.Scalar
 			if _, err := shareScalar.SetCanonicalBytes(selected.Value); err != nil {
 				fmt.Printf("Failed to load share scalar: %v\n", err)
@@ -94,6 +95,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Initialize the participant signer.
 			var ps crypto.ParticipantSigner
 			err = ps.SetParticipant(&part)
 			if err != nil {
@@ -105,6 +107,8 @@ func InitializePartialSign(db *LocalDB) {
 				fmt.Printf("Failed to set signer indices: %v\n", err)
 				return
 			}
+
+			// Initialize the participant signer.
 			err = ps.SetLagrangeCoefficient()
 			if err != nil {
 				fmt.Printf("Failed to set Lagrange coefficients: %v\n", err)
@@ -112,7 +116,8 @@ func InitializePartialSign(db *LocalDB) {
 			}
 
 			fmt.Printf("Lagrange coefficients succesfully calculated.\n")
-			
+
+			// Decode the aggregated public point.
 			point, err := new(crypto.Point).SetBytes(resp.P)
 			if err != nil {
 				fmt.Printf("Failed to decode public key P: %v\n", err)
@@ -125,6 +130,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Create and configure the signing session.
 			session := &crypto.Session{}
 			err = session.SetID(resp.SessionID)
 			if err != nil {
@@ -147,6 +153,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Generate nonce material for the signing round.
 			var nonce crypto.NonceShare
 			if err := nonce.SetIndex(ps.GetParticipant().GetID()); err != nil {
 				fmt.Printf("Signing error: %v\n", err)
@@ -174,6 +181,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Build the first signing message (M1).
 			ci, err := nonce.GetCommit()
 			if err != nil {
 				fmt.Printf("Signing error: %v\n", err)
@@ -198,7 +206,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
-			// Client sends its MaterialToSend1
+			// Send M1 to the server.
 			setM1Req := api.SetM1Request{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -217,6 +225,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Build the second signing message (M2).
 			Ri, err := nonce.GetRi()
 			if err != nil {
 				fmt.Printf("Signing error: %v\n", err)
@@ -241,7 +250,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
-			// Client now retrieves the full arrays of MaterialsToSend1 of all participants
+			// Request all M1 messages from the server.
 			getM1Req := api.GetM1Request{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -256,6 +265,7 @@ func InitializePartialSign(db *LocalDB) {
 			ticker := time.NewTicker(3 * time.Second)
 			defer ticker.Stop()
 
+			// Wait until all M1 messages are available.
 			var allM1resp api.GetM1Response
 			for range ticker.C {
 				if err := callAPI("POST", "/sign/getm1", signedGetM1Req, &allM1resp); err != nil {
@@ -265,6 +275,7 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
+			// Reconstruct all received M1 messages.
 			var allM1 []crypto.MaterialToSend1
 			for _, m := range allM1resp.M1Array {
 				var m1 crypto.MaterialToSend1
@@ -281,11 +292,12 @@ func InitializePartialSign(db *LocalDB) {
 				allM1 = append(allM1, m1)
 			}
 
+			// Sort M1 messages by participant index.
 			slices.SortFunc(allM1, func(a, b crypto.MaterialToSend1) int {
 				return cmp.Compare(a.GetIndex(), b.GetIndex())
 			})
 
-			// Client sets MaterialToSend2 on server
+			// Send M2 to the server.
 			RiPoint := m2.GetRi()
 			setM2Req := api.SetM2Request{
 				Username:  db.MyIdentity.Name,
@@ -305,6 +317,7 @@ func InitializePartialSign(db *LocalDB) {
 				return
 			}
 
+			// Request all M2 messages from the server
 			getM2Req := api.GetM2Request{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -316,7 +329,7 @@ func InitializePartialSign(db *LocalDB) {
 				Signature: ed25519.Sign(db.MyIdentity.PrivateKey, getM2Bytes),
 			}
 
-			// Client now retrieves the full arrays of MaterialsToSend2 of all participants
+			// Wait until all M2 messages are available.
 			var allM2resp api.GetM2Response
 			for range ticker.C {
 				if err := callAPI("POST", "/sign/getm2", signedGetM2Req, &allM2resp); err != nil {
@@ -326,6 +339,7 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
+			// Reconstruct all received M2 messages.
 			var allM2 []crypto.MaterialToSend2
 			for _, m := range allM2resp.M2Array {
 				Ri, err := new(crypto.Point).SetBytes(m.Ri)
@@ -349,11 +363,12 @@ func InitializePartialSign(db *LocalDB) {
 				allM2 = append(allM2, m2)
 			}
 
+			// Sort M2 messages by participant index.
 			slices.SortFunc(allM2, func(a, b crypto.MaterialToSend2) int {
 				return cmp.Compare(a.GetIndex(), b.GetIndex())
 			})
 
-			// Trigger verify of Materials received
+			// Verify consistency between received M1 and M2 messages.
 			if len(allM1) != len(allM2) {
 				fmt.Println("Haven't received the same number of M1s and M2s.")
 				continue
@@ -378,15 +393,16 @@ func InitializePartialSign(db *LocalDB) {
 				}
 			}
 
+			// Compute the aggregated nonce R.
 			if err := ps.SetR(allM2); err != nil {
 				fmt.Println("Could not set R.")
 				break
 			}
 
-			// placeholder message, in a real application this would need to be agreed upon
+			// Placeholder message to be signed.
 			msg := []byte("transaction to sign")
 
-			// Partial signature is created from the share and setn to server
+			// Generate the participant partial signature.
 			if err := ps.SetPartialSignature(msg); err != nil {
 				fmt.Printf("Could not create partial signature: %v\n", err)
 				break
@@ -395,6 +411,7 @@ func InitializePartialSign(db *LocalDB) {
 			zPart := ps.GetPartialSignature()
 			zScalar := zPart.GetZ()
 
+			// Send the partial signature to the server.
 			partSignReq := api.SendPartialSign{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -415,7 +432,7 @@ func InitializePartialSign(db *LocalDB) {
 				break
 			}
 
-			// Client retrieves and combines all partial signatures
+			// Request all partial signatures from the server.
 			getPartSignReq := api.GetPartialSigns{
 				Username:  db.MyIdentity.Name,
 				SessionID: session.GetID(),
@@ -429,6 +446,7 @@ func InitializePartialSign(db *LocalDB) {
 
 			var signResp api.GetPartialSignsResp
 
+			// Wait until all partial signatures are available.
 			for range ticker.C {
 				if err := callAPI("POST", "/sign/getSign", signedGetPartSignReq, &signResp); err != nil {
 					fmt.Println("Waiting for part signs...")
@@ -438,6 +456,7 @@ func InitializePartialSign(db *LocalDB) {
 				}
 			}
 
+			// Reconstruct partial signatures received from the server.
 			var finalPartials []crypto.PartialSignature
 			for _, pDto := range signResp.PartialSignatures {
 				var z crypto.Scalar
@@ -452,14 +471,16 @@ func InitializePartialSign(db *LocalDB) {
 				finalPartials = append(finalPartials, partSig)
 			}
 
+			// Combine all partial signatures into the final signature.
 			if err := ps.CombineSignature(finalPartials); err != nil {
 				fmt.Printf("Could not combine signatures: %v\n", err)
 				break
 			}
 
-			// Brutely print it, should either save it or prettify it
+			// Print the generated signature.
 			fmt.Printf("Final signature: %v\n", ps.GetSignature())
 
+			// Verify the final aggregated signature.
 			bool, err := crypto.VerifySignature(*point, []byte("transaction to sign"), ps.GetSignature(), *session)
 			if err != nil {
 				fmt.Printf("Could not verify signature: %v\n", err)
@@ -469,13 +490,13 @@ func InitializePartialSign(db *LocalDB) {
 			if bool {
 				fmt.Println("Signature verified succesfully!")
 
-				// Zeroize share in db
-				// other function data should be handled by GC
+				// Zeroize the consumed share from local memory.
 				if db.ReceivedShares[idx].Value != nil {
 					clear(db.ReceivedShares[idx].Value)
 					runtime.KeepAlive(db.ReceivedShares)
 				}
 
+				// Remove the used share from the local database.
 				db.ReceivedShares = append(db.ReceivedShares[:idx], db.ReceivedShares[idx+1:]...)
 				SaveDB(db)
 			} else {
@@ -484,9 +505,11 @@ func InitializePartialSign(db *LocalDB) {
 
 			break
 		} else if resp.Status == "waiting" {
+			// Waiting for additional participants to join.
 			fmt.Println("\rWaiting for other participants...")
 			time.Sleep(3 * time.Second)
 		} else {
+			// Abort the signing procedure if the server rejects the request.
 			fmt.Printf("\nABORT: %s\n", resp.Message)
 			return
 		}

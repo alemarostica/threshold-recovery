@@ -24,9 +24,11 @@ import (
 	"golang.org/x/term"
 )
 
-// util function to call a generic endpoint on the server
+// Sends a generic HTTP request to the server API.
 func callAPI(method, path string, payload any, out any) error {
 	var body io.Reader
+
+	// Serialize request payload if present
 	if payload != nil {
 		bz, err := json.Marshal(payload)
 		if err != nil {
@@ -35,36 +37,45 @@ func callAPI(method, path string, payload any, out any) error {
 		body = bytes.NewBuffer(bz)
 	}
 
+	// Build the HTTP request.
 	req, err := http.NewRequest(method, ServerURL+path, body)
 	if err != nil {
 		return err
 	}
 
+	// Set JSON content type for POST requests.
 	if method == "POST" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// I think this is needed with self signed certificates
+	// Configure TLS transport for self-signed certificates
 	tr := &http.Transport{TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true,
 	}}
 
+	// Create HTTP client with timeout.
 	client := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: tr,
 	}
+
+	// Execute the request.
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("connection failed: %w", err)
 	}
 
+	// Handle server-side errors.
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
 		errMsg, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(errMsg))
 	}
 
+	// Decode response body if an output object is provided.
 	if out != nil {
+
+		// Stream raw response into writer if supported.
 		if w, ok := out.(io.Writer); ok {
 			defer resp.Body.Close()
 			_, err := io.Copy(w, resp.Body)
@@ -78,32 +89,39 @@ func callAPI(method, path string, payload any, out any) error {
 	return nil
 }
 
-// Use Argon2id to derive an encryption key from password
-// of course, password has to be decently strong
+// Derives a symmetric encryption key from a password using Argon2id.
 func deriveKey(password []byte, salt []byte) []byte {
-	// Go docs actually suggest time 1 and memory 64*1024, bruh
+
+	// Recommended Argon2id configuration for interactive logins.
+
 	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
 }
 
-// Take the in-memory DB and encrypt it with a argon2 derived key
+// Encrypts the local database before persisting it to disk.
 func encryptDB(db *LocalDB) ([]byte, error) {
+
+	// Serialize database into JSON format.
 	plaintext, err := json.Marshal(db)
 	if err != nil {
 		return nil, err
 	}
 
+	// Initialize ChaCha20-Poly1305 AEAD cipher.
 	aead, err := chacha20poly1305.New(db.SessionKey)
 	if err != nil {
 		return nil, err
 	}
 
+	// Generate a random nonce.
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
 
+	// Encrypt and authenticate database contents.
 	ciphertext := aead.Seal(nil, nonce, plaintext, nil)
 
+	// Build encrypted database container.
 	env := EncryptedDB{
 		Salt:       db.Salt,
 		Nonce:      nonce,
@@ -112,14 +130,17 @@ func encryptDB(db *LocalDB) ([]byte, error) {
 	return json.MarshalIndent(env, "", "  ")
 }
 
-// decrypt stored DB with argon2 derived key
+// Decrypts the encrypted database using the derived session key.
 func decryptDB(env *EncryptedDB, key []byte) ([]byte, error) {
+
+	// Initialize AEAD cipher instance.
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
 		return nil, err
 	}
 
-	// Password is wrong or data is tampered
+	// Decrypt and authenticate database contents.
+	// Failure may indicate either an invalid password or tampered data.
 	plaintext, err := aead.Open(nil, env.Nonce, env.Ciphertext, nil)
 	if err != nil {
 		return nil, err
@@ -128,11 +149,13 @@ func decryptDB(env *EncryptedDB, key []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// Initialize the db
-// Either create one or load it from memory
+// Initializes the local database by either loading or creating it.
 func InitDB(r *bufio.Reader) (*LocalDB, error) {
+
+	// Attempt to read encrypted database file.
 	data, err := os.ReadFile(DBFile)
 
+	// Create a new database if none exists.
 	if os.IsNotExist(err) || len(data) == 0 {
 		db := &LocalDB{
 			Contacts:       make(map[string]string),
@@ -145,20 +168,24 @@ func InitDB(r *bufio.Reader) (*LocalDB, error) {
 		return nil, err
 	}
 
+	// Decode encrypted database container.
 	var env EncryptedDB
 	if err := json.Unmarshal(data, &env); err != nil {
 		return nil, errors.New("failed to parse encrypted database format")
 	}
 
+	// Attempt user login and database decryption.
 	return loginAndUnlock(&env)
 }
 
-// Create the account of the user
+// Creates and registers a new user identity.
 func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 	for {
+		// Read desired username.
 		fmt.Print("Choose username: ")
 		name := ReadInput(r)
 
+		// Read password securely from terminal.
 		fmt.Printf("Choose password: ")
 		bytePassword, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Println()
@@ -167,12 +194,14 @@ func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 			continue
 		}
 
+		// Generate random salt for password derivation.
 		salt := make([]byte, 16)
 		if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 			fmt.Printf("Failed to generate salt: %v\n", err)
 			continue
 		}
 
+		// Generate Ed25519 identity key pair.
 		pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			fmt.Printf("Failed to generate identity keys: %v\n", err)
@@ -181,22 +210,28 @@ func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 
 		fmt.Print("Registering with server...")
 
+		// Register participant on the server.
 		var resp api.RegisterParticipantResponse
 		req := api.RegisterParticipantRequest{
 			ID: name, PublicKey: pubKey,
 		}
 		if err := callAPI("POST", "/participants", req, &resp); err != nil {
 			fmt.Printf("Server registration failed: %v\n", err)
+
+			// Zeroize password from memory.
 			clear(bytePassword)
 			runtime.KeepAlive(bytePassword)
 			continue
 		}
 
+		// Derive session encryption key from password.
 		db.Salt = salt
 		db.SessionKey = deriveKey(bytePassword, salt)
+		// Zeroize password after key derivation.
 		clear(bytePassword)
 		runtime.KeepAlive(bytePassword)
 
+		// Store generated identity locally.
 		db.MyIdentity = &Identity{
 			Name:       name,
 			PublicKey:  pubKey,
@@ -204,17 +239,20 @@ func SetupIdentity(r *bufio.Reader, db *LocalDB) {
 		}
 		db.ServerPub = resp.ServerPublicKey
 
+		// Persist encrypted database to disk.
 		SaveDB(db)
 
 		return
 	}
 }
 
-// Login function, tries to decrypt db with password, if present
+// Attempts user login and decrypts the local database.
 func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 	fmt.Println("Encrypted database found.")
 
+	// Allow at most three login attempts.
 	for range 3 {
+		// Read password securely from terminal.
 		fmt.Printf("Enter password to login: ")
 		passwordBytes, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Println()
@@ -225,14 +263,19 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 		start := time.Now()
 		targetDuration := 2 * time.Second
 
+		// Derive decryption key from password.
 		key := deriveKey(passwordBytes, env.Salt)
 
+		// Zeroize password after derivation
 		clear(passwordBytes)
 		runtime.KeepAlive(passwordBytes)
 
+		// Attempt database decryption.
 		plaintext, err := decryptDB(env, key)
 
 		if err == nil {
+
+			// Rebuild database structure from JSON.
 			var db LocalDB
 			if err := json.Unmarshal(plaintext, &db); err != nil {
 				return nil, errors.New("database decrypted, but JSON is corrupted")
@@ -240,6 +283,7 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 
 			db.SessionKey = key
 			db.Salt = env.Salt
+			// Initialize missing maps if necessary.
 			if db.MyWallets == nil {
 				db.MyWallets = make(map[string]string)
 			}
@@ -251,6 +295,7 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 			return &db, nil
 		}
 
+		// Artificial delay to slow down brute-force attempts.
 		elapsed := time.Since(start)
 		if elapsed < targetDuration {
 			time.Sleep(targetDuration - elapsed)
@@ -261,8 +306,10 @@ func loginAndUnlock(env *EncryptedDB) (*LocalDB, error) {
 	return nil, errors.New("maximum login attempts reached")
 }
 
-// Menu functions
+// Displays the interactive client menu.
 func PrintMenu(db *LocalDB) {
+
+	// Clear terminal screen.
 	fmt.Print("\033[H\033[2J")
 	fmt.Println("==================================================================")
 	fmt.Printf(" USER: %s | CONTACTS: %d | CREATED: %d\n",
@@ -275,16 +322,20 @@ func PrintMenu(db *LocalDB) {
 	fmt.Printf("Server Pub: %s\n", hex.EncodeToString(db.ServerPub))
 }
 
+// Displays information about the current user identity.
 func ShowIdentity(db *LocalDB) {
 	fmt.Println("\n--- Identity ---")
 	fmt.Printf("Username:   %s\n", db.MyIdentity.Name)
 	fmt.Printf("Public Key: %s\n", hex.EncodeToString(db.MyIdentity.PublicKey))
 }
 
-// Add a friend to be able to send them shares
+// Adds a trusted contact to the local directory.
 func AddContact(r *bufio.Reader, db *LocalDB) {
+
+	// Read target username.
 	fmt.Print("Type ID of friend to add: ")
 	name := ReadInput(r)
+	// Prevent self-registration as contact.
 	if name == db.MyIdentity.Name {
 		fmt.Printf("You can't be friends with yourself! (...maybe?)")
 		return
@@ -295,6 +346,7 @@ func AddContact(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
+	// Retrieve participant information from server.
 	var signedResp api.SignedParticipantResponse
 	err := callAPI("GET", fmt.Sprintf("/participants?id=%s", name), nil, &signedResp)
 	if err != nil {
@@ -303,17 +355,21 @@ func AddContact(r *bufio.Reader, db *LocalDB) {
 	}
 
 	resp := signedResp.Data
+
+	// Verify server signature authenticity.
 	dataBytes, _ := json.Marshal(resp)
 	if !ed25519.Verify(db.ServerPub, dataBytes, signedResp.Signature) {
 		fmt.Println("Invalid response signature.")
 		return
 	}
 
+	// Reject stale directory responses.
 	if resp.Epoch < db.DirectoryEpoch {
 		fmt.Println("Obsolete epoch.")
 		return
 	}
 
+	// Store contact locally.
 	db.Contacts[name] = hex.EncodeToString(resp.PublicKey)
 	db.DirectoryEpoch = resp.Epoch
 	SaveDB(db)
@@ -321,6 +377,7 @@ func AddContact(r *bufio.Reader, db *LocalDB) {
 	fmt.Printf("Added friend '%s'.\n", name)
 }
 
+// Displays wallets created by the current user.
 func ListCreatedWallets(db *LocalDB) {
 	fmt.Println("\n--- [WALLETS YOU CREATED] ---")
 	if len(db.MyWallets) == 0 {
@@ -332,13 +389,13 @@ func ListCreatedWallets(db *LocalDB) {
 	}
 }
 
-// Utility to read form stdin
+// Reads and trims a line of input from standard input.
 func ReadInput(r *bufio.Reader) string {
 	input, _ := r.ReadString('\n')
 	return strings.TrimSpace(input)
 }
 
-// Utility to update DB at any time
+// Encrypts and persists the local database to disk.
 func SaveDB(db *LocalDB) {
 	encData, err := encryptDB(db)
 	if err != nil {
