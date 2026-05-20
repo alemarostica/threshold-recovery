@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
@@ -93,7 +95,9 @@ func (p *DefaultProvider) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, e
 
 	// Generate random nonce.
 	nonce := make([]byte, aead.NonceSize())
-	rand.Read(nonce)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, err
+	}
 
 	// Encrypt the plaintext with associated data.
 	ct := aead.Seal(nil, nonce, plaintext, aad)
@@ -121,6 +125,10 @@ func (p *DefaultProvider) RandomNonce() []byte {
 
 	b := make([]byte, 32)
 	rand.Read(b)
+
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic(fmt.Errorf("failed to generate random nonce: %w", err))
+	}
 
 	return b
 
