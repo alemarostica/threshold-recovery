@@ -6,9 +6,12 @@ import (
 	"time"
 )
 
-// Data Transfer Objects, everything coming from the outside world
-// Most requests by the client are signed with their private key
-// so most DTOs have a wrapper containing the signature of the message
+// This file defines the Data Transfer Objects exchanged between clients
+// and the server.
+//
+// Most security-sensitive requests are authenticated by wrapping the request
+// payload together with an Ed25519 signature. The server verifies this
+// signature before processing the request.
 
 type FriendShareInput struct {
 	FriendPubKey  []byte `json:"friend_public_key"`
@@ -35,7 +38,7 @@ type RegisterResponse struct {
 	PubKey       []byte `json:"public_key"`
 	FriendPubKey []byte `json:"friend_public_key"`
 
-	// let's add some security
+	// The timestamp is included in the signed response to make replay attacks harder.
 	Timestamp int64  `json:"timestamp"`
 	Signature []byte `json:"signature"`
 }
@@ -49,7 +52,7 @@ type LivenessRequest struct {
 
 type SignedLivenessRequest struct {
 	Data      LivenessRequest `json:"data"`
-	Signature []byte          `json:"singature"`
+	Signature []byte          `json:"signature"`
 }
 
 // The request to the server to provide a partial signature
@@ -64,7 +67,7 @@ type RegisterParticipantRequest struct {
 }
 
 type RegisterParticipantResponse struct {
-	ServerPublicKey ed25519.PublicKey   `json:"server_public_key"`
+	ServerPublicKey ed25519.PublicKey `json:"server_public_key"`
 }
 
 type ParticipantResponse struct {
@@ -78,7 +81,7 @@ type SignedParticipantResponse struct {
 	Signature []byte              `json:"signature"`
 }
 
-// Signing stuff
+// DTOs used during the threshold signing protocol.
 type SignInitRequest struct {
 	WalletPubKey   []byte               `json:"wallet_pub_key"`
 	WalletUsername string               `json:"username"`
@@ -131,7 +134,7 @@ type M1_dto struct {
 }
 
 type M2_dto struct {
-	Ri    []byte               `json:"ci"`
+	Ri    []byte               `json:"Ri"`
 	Index crypto.ParticipantID `json:"index"`
 }
 

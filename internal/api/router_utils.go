@@ -30,7 +30,9 @@ type SigningSession struct {
 	RetrievedBy       map[string]bool
 }
 
-// Sort slices of MaterialToSend{1,2}
+// sortMaterials orders the nonce commitment and nonce reveal messages by
+// participant index. This ensures that the two slices can be compared
+// position-by-position during nonce verification.
 func sortMaterials(session *SigningSession) {
 	slices.SortFunc(session.Materials1, func(a, b crypto.MaterialToSend1) int {
 		return cmp.Compare(a.GetIndex(), b.GetIndex())
@@ -43,7 +45,11 @@ func sortMaterials(session *SigningSession) {
 	session.Sorted = true
 }
 
-// Utility to verify received nonces in a session
+// verifyNonces checks that each revealed nonce is consistent with the
+// commitment previously submitted by the same participant.
+//
+// The server nonce is skipped because it is generated locally by the server
+// and does not need to be verified through the commitment-opening mechanism.
 func verifyNonces(session *SigningSession) error {
 	for i := range len(session.Materials1) {
 		if i == 0 {

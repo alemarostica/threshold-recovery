@@ -6,47 +6,51 @@ import (
 	"time"
 )
 
-// This type represents the state of the recovery process
-
+// WalletState represents the current recovery state of a wallet.
 type WalletState string
 
-// Various possible states of the wallet
 const (
 	StateActive   WalletState = "ACTIVE"
 	StateDormant  WalletState = "DORMANT"
 	StateRecovery WalletState = "RECOVERY"
 )
 
-// The user's data
+// Wallet stores the server-side metadata required to enforce the recovery
+// policy and participate in the threshold signing protocol.
 type Wallet struct {
 	ID string `json:"id"`
-	// Used in verification of liveness signatures
+	// PublicKey is used to verify liveness updates signed by the wallet owner.
 	PublicKey []byte `json:"public_key"`
 
-	// Access control
+	// Recovery policy parameters.
 	LastActivity        time.Time     `json:"last_activity"`
 	ExpirationDate      time.Time     `json:"expiration_date"`
 	InactivityThreshold time.Duration `json:"inactivity_threshold"`
 
-	// Cryptography stuff
-	// The server's share, locked unless policy allows access
-	ServerShare []byte `json:"server_share"`
+	// Cryptographic material stored by the server.
+	//
+	// ServerShare is used only after the recovery policy allows activation.
+	// Commitments allow participants and the server to verify secret shares.
+	ServerShare []byte   `json:"server_share"`
 	Commitments [][]byte `json:"commitments"`
 
-	// A sort of "mailbox" for other users
-	// Key is the friend's ID or Hash of their PubKey, value is the encrypted share
+	// Public threshold parameters and wallet public key used during recovery.
 	ThresholdParams crypto.ThresholdParams `json:"threshold_params"`
 	P               []byte                 `json:"point"`
 }
 
-// Returns whether the wallet is in a recoverable state
+// IsRecoverable returns true when the wallet recovery policy is satisfied.
+//
+// Recovery is enabled either when the inactivity period has elapsed since the
+// last liveness update, or when the absolute expiration date has passed.
 func (w *Wallet) IsRecoverable() bool {
 	// If now > LastActivity + Threshold OR now > ExpirationDate
 	deadline := w.LastActivity.Add(w.InactivityThreshold)
 	return time.Now().After(deadline) || time.Now().After(w.ExpirationDate)
 }
 
-// Kind of like a registered user
+// Participant represents a registered user that can receive recovery shares
+// and take part in the collaborative signing protocol.
 type Participant struct {
 	ID        string            `json:"id"`
 	PublicKey ed25519.PublicKey `json:"public_key"`

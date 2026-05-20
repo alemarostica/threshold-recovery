@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-// Simple struct which holds all the configurations
+// Config contains the server configuration loaded from the JSON config file.
 type Config struct {
 	ServerPort          string `json:"server_port"`
 	DataDir             string `json:"data_dir"`
@@ -13,7 +13,7 @@ type Config struct {
 	HMACSecret          string `json:"hmac_secret"`
 }
 
-// This loads the configuration JSON file and parses it into a Config var
+// Load reads a JSON configuration file from path and decodes it into a Config.
 func Load(path string) (*Config, error) {
 	file, err := os.ReadFile(path)
 	if err != nil {

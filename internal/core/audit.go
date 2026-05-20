@@ -24,16 +24,20 @@ const (
 	EventLivenessUpdateFail      AuditEvent = "LIV_UPDATE_FAIL"
 )
 
-// Every security log is appended to a file
+// AuditLogger appends security-relevant events to an audit log file.
 type AuditLogger struct {
 	FilePath string
 }
 
+// NewAuditLogger creates an AuditLogger that writes entries to the given path.
 func NewAuditLogger(path string) *AuditLogger {
 	return &AuditLogger{FilePath: path}
 }
 
-// Basically the function that logs everything
+// Log appends a timestamped audit entry for the given wallet and event.
+//
+// Audit logging is best-effort in this prototype: failures are reported to
+// stdout, but they do not interrupt the main protocol execution.
 func (l *AuditLogger) Log(walletID string, event AuditEvent, details string) {
 	entry := fmt.Sprintf("[%s] WALLET:%s EVENT:%s MSG:%s\n",
 		time.Now().Format(time.RFC3339), walletID, event, details)
