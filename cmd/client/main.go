@@ -273,7 +273,7 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			part.SetID(crypto.ParticipantID(message.Index))
 			part.SetShare(partShare)
 			part.SetName(message.Username)
-			
+
 			if ok, err := part.VerifyConsistency(rebuiltCommitments); err != nil {
 				fmt.Printf("Error while verifying share: %v\n", err)
 				continue
@@ -285,8 +285,8 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			share := Share{
 				Username:  message.Username,
 				WalletPub: message.WalletPub,
-				Value: partShare.Bytes(),
-				Index: message.Index,
+				Value:     partShare.Bytes(),
+				Index:     message.Index,
 			}
 
 			// save share in the local DB
@@ -310,7 +310,7 @@ func pingAllWallets(db *LocalDB) {
 		}
 
 		req := api.LivenessRequest{
-			Username: db.MyIdentity.Name,
+			Username:  db.MyIdentity.Name,
 			PublicKey: walletPubKey,
 			Timestamp: time.Now().Unix(),
 		}
@@ -346,8 +346,8 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 
 	fmt.Print("Enter threshold, at least 2 (k): ")
 	k, err := strconv.Atoi(ReadInput(r))
-	if err != nil || k < 1 || k > n {
-		fmt.Printf("Error: k must be between 1 and %d\n", n)
+	if err != nil || k < 2 || k > n {
+		fmt.Printf("Error: k must be between 2 and %d\n", n)
 		return
 	}
 
@@ -517,7 +517,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	// zeroize the secret
 	secret = crypto.Scalar{}
 	runtime.KeepAlive(&secret)
-	
+
 	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
 	fmt.Println("Handshakes succesfully initiated")

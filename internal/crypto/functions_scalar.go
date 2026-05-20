@@ -12,13 +12,6 @@ import (
 
 // This file contains scalar-field utilities used by the LSSS implementation.
 
-// IntToBytes encodes an integer participant identifier as 4 bytes.
-func IntToBytes(i int) []byte {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint64(buf, uint64(i))
-	return buf
-}
-
 // BytesToParticipantID decodes a 4-byte participant identifier.
 func BytesToParticipantID(b []byte) (ParticipantID, error) {
 	if len(b) != 4 {
