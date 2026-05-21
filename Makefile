@@ -20,7 +20,7 @@ prepare-deps:
 $(SERVER_CRT):
 	@echo "Generating SSL certificates..."
 	mkdir -p $(CERT_DIR)
-	openssl req -x509 -newkey rsa:4096 -keyout $(SERVER_KEY) -out $(SERVER_CRT) -days 365 -nodes -subj "/CN=localhost"
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout $(SERVER_KEY) -out $(SERVER_CRT) -days 365 -nodes -subj "/CN=localhost"
 
 build-server: prepare-deps $(SERVER_CRT)
 	@echo "Building the server..."
