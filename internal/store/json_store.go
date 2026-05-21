@@ -1,7 +1,3 @@
-// Technically, there could be some race conditions when editing data about files
-// Realistically this will not happen since this is a demo
-// Do we care?
-
 package store
 
 import (
@@ -18,7 +14,8 @@ import (
 	"time"
 )
 
-// The JSONStore is simply a path to a directory
+// JSONStore provides a simple file-based storage layer.
+// Wallets and participants are persisted as JSON files inside DataDir.
 type JSONStore struct {
 	DataDir     string
 	HMACSecret  []byte
@@ -38,21 +35,22 @@ func NewJSONStore(dir, secret string) *JSONStore {
 	}
 }
 
+// DeriveFriendSlot derives a deterministic storage slot for a friend within a wallet.
+// The slot is bound to both the wallet public key and the friend's public key, so that
+// the same friend receives different slots in different wallets.
 func (s *JSONStore) DeriveFriendSlot(walletPubKey, friendPubKey []byte) string {
 	h := hmac.New(sha256.New, s.HMACSecret)
 
-	// Must bind slot to both wallet and friend otherwise same friends would have same slot in different wallets
 	h.Write(walletPubKey)
 	h.Write(friendPubKey)
 
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// This take a wallet name and finds the corresponding file on local storage
+// GetWallet retrieves a wallet from local storage using the wallet public key
+// and the corresponding user public key.
 func (s *JSONStore) GetWallet(pubKey []byte, userPubKey ed25519.PublicKey) (*core.Wallet, error) {
-	// fmt.Printf("[GetWallet] pubkey: %v\n", pubKey)
 	id := s.deriveID(pubKey, userPubKey)
-	// fmt.Printf("[GetWallet] id (derived): %v\n", id)
 	path := filepath.Join(s.DataDir, id+".json")
 
 	s.mu.Lock()
@@ -62,12 +60,13 @@ func (s *JSONStore) GetWallet(pubKey []byte, userPubKey ed25519.PublicKey) (*cor
 		return nil, err
 	}
 	var w core.Wallet
-	// Funky name for a function that parses JSON, it also appears to use some base64 magic
 	err = json.Unmarshal(data, &w)
 	return &w, err
 }
 
-// Creates a new wallet to local storage
+// RegisterWallet stores a newly created wallet in local storage.
+// The wallet identifier is deterministically derived from the wallet public key
+// and the user public key.
 func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error {
 	w.ID = s.deriveID(w.PublicKey, userPubKey)
 
@@ -80,6 +79,7 @@ func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey)
 	return s.save(w)
 }
 
+// DeleteWallet removes a wallet from local storage.
 func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) error {
 	w.ID = s.deriveID(w.PublicKey, userPubKey)
 
@@ -99,7 +99,8 @@ func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) e
 	return nil
 }
 
-// Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
+// UpdateLiveness updates the last activity timestamp of a wallet.
+// Since this prototype uses JSON file storage, the whole wallet file is rewritten.
 func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error {
 	w, err := s.GetWallet(pubKey, userPubKey)
 	if err != nil {
@@ -109,7 +110,7 @@ func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) 
 	return s.save(w)
 }
 
-// Private helper to write files
+// save writes a wallet to local JSON storage.
 func (s *JSONStore) save(w *core.Wallet) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -121,7 +122,8 @@ func (s *JSONStore) save(w *core.Wallet) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// Deterministically derive a Public key into a storage ID
+// deriveID deterministically derives an internal storage identifier from
+// a wallet public key and the corresponding user public key.
 func (s *JSONStore) deriveID(pubKey []byte, userPubKey ed25519.PublicKey) string {
 	h := hmac.New(sha256.New, s.HMACSecret)
 	h.Write(pubKey)
@@ -129,13 +131,15 @@ func (s *JSONStore) deriveID(pubKey []byte, userPubKey ed25519.PublicKey) string
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// loadDirectory loads the participant directory from local storage.
+// If no directory exists yet, an empty directory is initialized with epoch zero.
 func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
 	path := filepath.Join(s.DataDir, "participants.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &ParticipantDirectory{
-				Epoch:        0, // TODO: ma un int
+				Epoch:        0,
 				Participants: make(map[string]*core.Participant),
 			}, nil
 		}
@@ -149,7 +153,8 @@ func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
 	return &dir, nil
 }
 
-// Creates a new "registered user"
+// SaveParticipant stores a newly registered participant in the local directory.
+// The epoch is increased whenever the participant directory changes.
 func (s *JSONStore) SaveParticipant(p *core.Participant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,7 +179,8 @@ func (s *JSONStore) SaveParticipant(p *core.Participant) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// Retrieves a "registered user"
+// GetParticipant retrieves a registered participant and returns the current
+// participant-directory epoch together with it.
 func (s *JSONStore) GetParticipant(id string) (*core.Participant, uint64, error) {
 	dir, err := s.loadDirectory()
 	if err != nil {
