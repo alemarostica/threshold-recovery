@@ -348,8 +348,8 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 
 	fmt.Print("Enter threshold, at least 2 (k): ")
 	k, err := strconv.Atoi(ReadInput(r))
-	if err != nil || k < 1 || k > n {
-		fmt.Printf("Error: k must be between 1 and %d\n", n)
+	if err != nil || k < 2 || k > n {
+		fmt.Printf("Error: k must be between 2 and %d\n", n)
 		return
 	}
 

@@ -124,7 +124,7 @@ type SetM1Request struct {
 
 type SetM2Request struct {
 	SessionID []byte               `json:"session_id"`
-	Ri        []byte               `json:"ri"`
+	Ri        []byte               `json:"Ri"`
 	Index     crypto.ParticipantID `json:"index"`
 	Username  string               `json:"username"`
 }
