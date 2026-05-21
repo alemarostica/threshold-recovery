@@ -62,7 +62,7 @@ func main() {
 		serverPriv = priv
 		serverPub = pub
 
-		// scrivo la chiave sul file
+		// write key in local storage
 		err = os.WriteFile(keyPath, []byte(hex.EncodeToString(priv)), 0600)
 		if err != nil {
 			log.Fatalf("Failed to save the key: %v", err)
