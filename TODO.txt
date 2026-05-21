@@ -1,1 +1,2 @@
-- Add usage instructions and config details in report
+- Aggiungere limitazone server non associa ParticipantID con Requester
+- Sessioni di signing non sopravvivono a crash e restart

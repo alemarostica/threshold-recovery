@@ -671,7 +671,7 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 	alreadyJoined := slices.Contains(pending.Participants, req.ParticipantID)
 	if !alreadyJoined {
 		pending.Participants = append(pending.Participants, req.ParticipantID)
-		pending.Usernames = append(pending.Usernames, req.WalletUsername)
+		pending.Usernames = append(pending.Usernames, req.Requester)
 	}
 
 	// Create the signing session once the recovery threshold is reached.
@@ -872,13 +872,8 @@ func (h *Handler) handleSignInit(w http.ResponseWriter, r *http.Request) {
 			Message: "waiting for participants",
 		}
 		json.NewEncoder(w).Encode(resp)
+		return
 	}
-
-	json.NewEncoder(w).Encode(SignInitResponse{
-		Status:      "waiting",
-		Message:     "waiting for more participants",
-		JoinedCount: len(pending.Participants),
-	})
 }
 
 // handlePostMessage relays a key-exchange message to the recipient inbox.
@@ -931,6 +926,32 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 	req := signedReq.Data
 	walletHex := hex.EncodeToString(req.PublicKey)
 	dataBytes, _ := json.Marshal(req)
+
+	if req.PubParams.K < 2 {
+		http.Error(w, "Invalid threshold value, must be >= 2.", http.StatusBadRequest)
+		return
+	}
+
+	if req.PubParams.N < req.PubParams.K {
+		http.Error(w, "Invalid participants value, must be >= K.", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Commitments) != req.PubParams.K + 1 {
+		http.Error(w, "Invalid length of commitments slice.", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.ServerShare) != 32 {
+		http.Error(w, "Invalid length of server share.", http.StatusBadRequest)
+		return
+	}
+
+	point, _ := new(edwards25519.Point).SetBytes(req.P)
+	if point.Equal(edwards25519.NewIdentityPoint()) == 1{
+		http.Error(w, "Received an identity point as public key.", http.StatusBadRequest)
+		return
+	}
 
 	participant, _, err := h.Service.GetParticipant(req.Username)
 	if err != nil || !ed25519.Verify(participant.PublicKey, dataBytes, signedReq.Signature) {

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"threshold-recovery/internal/core"
 	"time"
 )
@@ -22,10 +23,11 @@ type JSONStore struct {
 	DataDir     string
 	HMACSecret  []byte
 	PKeyIDDBDir string
+	mu          sync.Mutex
 }
 
 type ParticipantDirectory struct {
-	Epoch        uint64                        `json:"epoch"`
+	Epoch        uint64                       `json:"epoch"`
 	Participants map[string]*core.Participant `json:"participants"`
 }
 
@@ -52,6 +54,9 @@ func (s *JSONStore) GetWallet(pubKey []byte, userPubKey ed25519.PublicKey) (*cor
 	id := s.deriveID(pubKey, userPubKey)
 	// fmt.Printf("[GetWallet] id (derived): %v\n", id)
 	path := filepath.Join(s.DataDir, id+".json")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -68,6 +73,8 @@ func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey)
 
 	path := filepath.Join(s.DataDir, w.ID+".json")
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	// Check if file exists
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("wallet for this public key already exists")
@@ -79,6 +86,9 @@ func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) e
 	w.ID = s.deriveID(w.PublicKey, userPubKey)
 
 	path := filepath.Join(s.DataDir, w.ID+".json")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return fmt.Errorf("wallet does not exist")
 	}
@@ -93,6 +103,8 @@ func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) e
 
 // Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
 func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	w, err := s.GetWallet(pubKey, userPubKey)
 	if err != nil {
 		return err
@@ -125,7 +137,7 @@ func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &ParticipantDirectory{
-				Epoch: 0, // TODO: ma un int
+				Epoch:        0, // TODO: ma un int
 				Participants: make(map[string]*core.Participant),
 			}, nil
 		}
@@ -141,6 +153,8 @@ func (s *JSONStore) loadDirectory() (*ParticipantDirectory, error) {
 
 // Creates a new "registered user"
 func (s *JSONStore) SaveParticipant(p *core.Participant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	dir, err := s.loadDirectory()
 	if err != nil {
 		return err

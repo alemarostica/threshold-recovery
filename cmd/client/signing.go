@@ -23,12 +23,12 @@ func InitializePartialSign(db *LocalDB) {
 	}
 
 	// Display available shares stored locally.
-	fmt.Println("\nAvailable shares for recovery:")
+	fmt.Println("\nAvailable wallets for recovery:")
 	for i, s := range db.ReceivedShares {
 		fmt.Printf("[%d] Wallet Owner: %s (Wallet Pub: %x)\n", i, s.Username, s.WalletPub)
 	}
 	// Select the share to use for recovery.
-	fmt.Print("Select share index: ")
+	fmt.Print("Select wallet number: ")
 	idxStr := ReadInput(bufio.NewReader(os.Stdin))
 	idx, _ := strconv.Atoi(idxStr)
 

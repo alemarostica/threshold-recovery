@@ -43,7 +43,7 @@ func (l *AuditLogger) Log(walletID string, event AuditEvent, details string) {
 		time.Now().Format(time.RFC3339), walletID, event, details)
 
 	// Open in append mode
-	f, err := os.OpenFile(l.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(l.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		fmt.Printf("CRITICAL: Failed to write audit log: %v\n", err)
 		return

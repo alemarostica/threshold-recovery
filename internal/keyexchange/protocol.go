@@ -3,6 +3,7 @@ package keyexchange
 import (
 	"bytes"
 	"errors"
+	"fmt"
 )
 
 // This file implements the three-round Authenticated Key Exchange (AKE) protocol.
@@ -27,6 +28,28 @@ func getBytes(data map[string][]byte, key string) ([]byte, error) {
 		return nil, errors.New("missing or empty field: " + key)
 	}
 	return val, nil
+}
+
+// validateMessageHeader checks that a protocol message belongs to the expected
+// phase and is exchanged between the expected peers.
+//
+// These checks are not a replacement for signature verification, but they
+// reject malformed or out-of-context messages before processing cryptographic
+// material.
+func validateMessageHeader(msg Message, expectedType MessageType, expectedFrom, expectedTo string) error {
+	if msg.Type != expectedType {
+		return fmt.Errorf("unexpected message type: got %s, expected %s", msg.Type, expectedType)
+	}
+
+	if msg.From != expectedFrom {
+		return fmt.Errorf("unexpected sender: got %s, expected %s", msg.From, expectedFrom)
+	}
+
+	if msg.To != expectedTo {
+		return fmt.Errorf("unexpected recipient: got %s, expected %s", msg.To, expectedTo)
+	}
+
+	return nil
 }
 
 // StartAsInitiator constructs and sends M1, the first protocol message.
@@ -145,6 +168,10 @@ func HandleM1(
 	}
 	state.NonceB = crypto.RandomNonce()
 
+	if err := validateMessageHeader(msg, M1, state.PeerID, state.MyID); err != nil {
+		return &SessionState{}, err
+	}
+
 	// Construct M2 payload as:
 	// message type || responder ID || initiator ID || responder public key || initiator public key || nonceA || nonceB
 	payload2 := bytes.Join([][]byte{
@@ -186,6 +213,10 @@ func HandleM2AsInitiator(
 	sender MessageSender,
 	plaintext []byte,
 ) error {
+
+	if err := validateMessageHeader(msg, M2, state.PeerID, state.MyID); err != nil {
+		return err
+	}
 
 	// Recover the responder's public verification key.
 	peerPubSig, err := dir.GetPublicKey(msg.From)
@@ -278,6 +309,10 @@ func HandleM3(
 	msg Message,
 	crypto CryptoProvider,
 ) ([]byte, error) {
+
+	if err := validateMessageHeader(msg, M3, state.PeerID, state.MyID); err != nil {
+		return nil, err
+	}
 
 	// Extract encrypted payload and nonce from M3.
 	ct, err := getBytes(msg.Data, "ct")

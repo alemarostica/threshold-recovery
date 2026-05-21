@@ -52,8 +52,8 @@ func sortMaterials(session *SigningSession) {
 // and does not need to be verified through the commitment-opening mechanism.
 func verifyNonces(session *SigningSession) error {
 	for i := range len(session.Materials1) {
-		if i == 0 {
-			// skip server?
+		if session.Materials1[i].GetIndex() == crypto.ServerID {
+			// skip server
 			continue
 		}
 

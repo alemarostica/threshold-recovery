@@ -20,7 +20,7 @@ prepare-deps:
 $(SERVER_CRT):
 	@echo "Generating SSL certificates..."
 	mkdir -p $(CERT_DIR)
-	openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=localhost"
+	openssl req -x509 -newkey rsa:4096 -keyout $(SERVER_KEY) -out $(SERVER_CRT) -days 365 -nodes -subj "/CN=localhost"
 
 build-server: prepare-deps $(SERVER_CRT)
 	@echo "Building the server..."
@@ -33,7 +33,7 @@ run-server: prepare-deps $(SERVER_CRT)
 build-client: prepare-deps $(SERVER_CRT)
 	@echo "Building the client..."
 	go build -o $(CLIENT_BINARY_NAME) $(CLIENT_SOURCE)
-	mkdir $(CLIENT_DIR)/1 $(CLIENT_DIR)/2 $(CLIENT_DIR)/3
+	mkdir -p $(CLIENT_DIR)/1 $(CLIENT_DIR)/2 $(CLIENT_DIR)/3
 
 clean:
 	@echo "Cleaning executables..."

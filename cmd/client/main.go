@@ -19,20 +19,20 @@ import (
 	"filippo.io/edwards25519"
 )
 
-// Stores the state of currently active handshake sessions.
+// Remember state of handshake sessions
 var activeSessions = make(map[string]*keyexchange.SessionState)
 
-// Temporarily stores shares until the handshake is complete.
+// Save share until handshake is complete
 var pendingMessages = make(map[string][]byte)
 
-// Client configuration constants.
+// Configuration
 const (
-	// To run locally, change if deploying remotely.
+	// To run locally, change if deploying remotely
 	ServerURL = "https://localhost:8443"
 	DBFile    = "client_db.json"
 )
 
-// Represents a secret share exchanged between participants.
+// Share to be sent to other participants via keyexchange
 type Share struct {
 	Value     []byte            `json:"scalar"`
 	Index     int               `json:"index"`
@@ -40,14 +40,14 @@ type Share struct {
 	WalletPub ed25519.PublicKey `json:"wallet_pub_key"`
 }
 
-// Structure used to store the encrypted local database.
+// DB is encrypted and stored in memory like this
 type EncryptedDB struct {
 	Salt       []byte `json:"salt"`
 	Nonce      []byte `json:"nonce"`
 	Ciphertext []byte `json:"ciphertext"`
 }
 
-// In-memory representation of the local client database
+// In-memory DB structure
 type LocalDB struct {
 	MyIdentity     *Identity         `json:"my_identity"`
 	Contacts       map[string]string `json:"contacts"`
@@ -59,17 +59,15 @@ type LocalDB struct {
 	Salt           []byte            `json:"-"`
 }
 
-// Represents the identity of a client.
+// Identity of user
 type Identity struct {
 	Name       string             `json:"name"`
 	PublicKey  ed25519.PublicKey  `json:"public_key"`
 	PrivateKey ed25519.PrivateKey `json:"private_key"`
 }
 
-// Handles the transmission of handshake messages through the relay server.
 type ShareSender struct{}
 
-// Sends a key exchange message to the relay server.
 func (cs *ShareSender) Send(msg keyexchange.Message) error {
 	err := callAPI("POST", "/shares/send", msg, nil)
 	if err != nil {
@@ -78,14 +76,12 @@ func (cs *ShareSender) Send(msg keyexchange.Message) error {
 	return nil
 }
 
-// Local representation of the directory used during key exchange.
 type ClientDirectory struct {
 	DirectoryEpoch uint64            `json:"directory_epoch"`
 	MyIdentity     *Identity         `json:"identity"`
 	Contacts       map[string]string `json:"contacts"`
 }
 
-// Returns the public key associated with a given user ID.
 func (cd *ClientDirectory) GetPublicKey(userID string) (ed25519.PublicKey, error) {
 	if userID == cd.MyIdentity.Name {
 		return cd.MyIdentity.PublicKey, nil
@@ -99,12 +95,11 @@ func (cd *ClientDirectory) GetPublicKey(userID string) (ed25519.PublicKey, error
 	return hex.DecodeString(hexKey)
 }
 
-// Returns the current directory epoch.
 func (cd *ClientDirectory) GetEpoch() uint64 {
 	return cd.DirectoryEpoch
 }
 
-// Main.
+// Main
 func main() {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -157,10 +152,10 @@ func main() {
 	}
 }
 
-// Starts a background goroutine that periodically polls the relay server
-// for incoming key exchange messages.
+// Constantly polls server for keyexchange message
+// unelegant, I know
 func startMessagePoller(db *LocalDB, dir *ClientDirectory) {
-	ticker := time.NewTicker(3 * time.Second) // Polling frequency.
+	ticker := time.NewTicker(3 * time.Second) // Frequenza di polling
 	go func() {
 		for range ticker.C {
 			pollRelay(db, dir)
@@ -168,10 +163,9 @@ func startMessagePoller(db *LocalDB, dir *ClientDirectory) {
 	}()
 }
 
-// Fetches and processes incoming relay messages.
 func pollRelay(db *LocalDB, dir *ClientDirectory) {
 	if dir.MyIdentity == nil {
-		return // Skip polling if the client is not registered
+		return // skippa if not registered
 	}
 
 	var msgs []keyexchange.Message
@@ -181,18 +175,18 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 		return
 	}
 	if len(msgs) == 0 {
-		return // No messages available.
+		return // no messages
 	}
 
 	provider := keyexchange.NewDefaultProvider()
 	sender := &ShareSender{}
 	myPriv := dir.MyIdentity.PrivateKey
 
-	// Loop that handles all received messages by type of message.
+	// Loop that handles all received messages by type of message
 	for _, msg := range msgs {
 		switch msg.Type {
 		case keyexchange.M1:
-			// Recipient side: receives the first handshake message
+			// We are friends that receive share
 			state, err := keyexchange.HandleM1(msg, dir.MyIdentity.Name, provider, dir, sender, myPriv)
 			if err != nil {
 				fmt.Printf("[RELAY] Error: failed to handle M1 message from %s: %v\n", msg.From, err)
@@ -200,23 +194,22 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			}
 			activeSessions[msg.From] = state
 		case keyexchange.M2:
-			// Initiator side: receives the handshake response.
-
-			// Retrieve the session state associated with the sender
+			// We are dealer, friend responded
+			// retrieve the session state
 			state, ok := activeSessions[msg.From]
 			if !ok {
 				fmt.Printf("Error: no active session found for M2 from %s\n", msg.From)
 				continue
 			}
 
-			// Retrieve the encrypted share waiting to be sent.
+			// Retrieve the pending share
 			shareBlob, ok := pendingMessages[msg.From]
 			if !ok {
 				fmt.Printf("No pending share to send to %s\n", msg.From)
 				continue
 			}
 
-			// Process M2 and send M3 containing the encrypted share.
+			// Process M2 and send M3 with share
 			err := keyexchange.HandleM2AsInitiator(state, msg, provider, dir, sender, shareBlob)
 			if err != nil {
 				fmt.Printf("Failed to handle M2 from %s: %v\n", msg.From, err)
@@ -226,26 +219,24 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			delete(activeSessions, msg.From)
 			delete(pendingMessages, msg.From)
 		case keyexchange.M3:
-			// Recipient side: receives the encrypted share.
+			// We are shareholder, dealer sent us encrypted share with M3
 			state, ok := activeSessions[msg.From]
 			if !ok {
 				fmt.Printf("No active session found for M3 from %s\n", msg.From)
 				continue
 			}
 
-			// Decrypt the received share.
+			// Decrypt share
 			plaintextMessage, err := keyexchange.HandleM3(state, msg, provider)
 			if err != nil {
 				fmt.Printf("Failed to decrypt M3 from %s: %v\n", msg.From, err)
 				continue
 			}
 
-			fmt.Printf("\nSuccesfully received share from %s.", msg.From)
+			// We received the share
+			fmt.Printf("\nSuccesfully received share from %s.\nSelect an option: ", msg.From)
 
-			// Temporary print.
-			os.WriteFile("test.bin", plaintextMessage, 0644)
-
-			// Deserialize the received share message
+			// Temporary print
 			message, err := keyexchange.UnmarshalShare(plaintextMessage)
 			if err != nil {
 				fmt.Printf("Could not unmarshal the share: %v\n", err)
@@ -261,7 +252,6 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			var rebuiltCommitments crypto.Commitment
 			commitmentsMalformed := false
 
-			// Rebuild commitment from the received byte encoding.
 			for _, b := range message.Commitments {
 				p, err := edwards25519.NewIdentityPoint().SetBytes(b)
 				if err != nil {
@@ -277,12 +267,12 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 				continue
 			}
 
-			// Verify the consistency of the received share
+			// Verification
 			var part crypto.Participant
 			part.SetID(crypto.ParticipantID(message.Index))
 			part.SetShare(partShare)
 			part.SetName(message.Username)
-
+			
 			if ok, err := part.VerifyConsistency(rebuiltCommitments); err != nil {
 				fmt.Printf("Error while verifying share: %v\n", err)
 				continue
@@ -294,23 +284,20 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			share := Share{
 				Username:  message.Username,
 				WalletPub: message.WalletPub,
-				Value:     partShare.Bytes(),
-				Index:     message.Index,
+				Value: partShare.Bytes(),
+				Index: message.Index,
 			}
 
-			// Save the verified share into the local database
+			// save share in the local DB
 			db.ReceivedShares = append(db.ReceivedShares, share)
 
 			delete(activeSessions, msg.From)
 			SaveDB(db)
 		}
-
-		// the prompt
-		fmt.Print("\nSelect an option: ")
 	}
 }
 
-// Sends periodic liveness updates for all locally registered wallets.
+// Refresh liveness of creted wallets
 func pingAllWallets(db *LocalDB) {
 	for walletPubHex := range db.MyWallets {
 		walletPubKey, err := hex.DecodeString(walletPubHex)
@@ -319,7 +306,7 @@ func pingAllWallets(db *LocalDB) {
 		}
 
 		req := api.LivenessRequest{
-			Username:  db.MyIdentity.Name,
+			Username: db.MyIdentity.Name,
 			PublicKey: walletPubKey,
 			Timestamp: time.Now().Unix(),
 		}
@@ -340,11 +327,12 @@ func pingAllWallets(db *LocalDB) {
 	}
 }
 
-// Creates and registers a new wallet.
+// Add a new wallet
 func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Println("\n--- [CREATE NEW THRESHOLD WALLET] ---")
 
-	// Read threshold scheme parameters.
+	// Get n and k
+	// Remember that one share goes to the server, this n is just the friends
 	fmt.Print("Enter number of shares for friends, at least 2 (n): ")
 	n, err := strconv.Atoi(ReadInput(r))
 	if err != nil || n < 2 {
@@ -354,12 +342,11 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 
 	fmt.Print("Enter threshold, at least 2 (k): ")
 	k, err := strconv.Atoi(ReadInput(r))
-	if err != nil || k < 2 || k > n {
-		fmt.Printf("Error: k must be between 2 and %d\n", n)
+	if err != nil || k < 1 || k > n {
+		fmt.Printf("Error: k must be between 1 and %d\n", n)
 		return
 	}
 
-	// Display available contacts.
 	fmt.Println("\nYour contacts:")
 	var names []string
 	for name := range db.Contacts {
@@ -375,7 +362,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	var chosenNames []string
 	var friendKeys [][]byte
 
-	// Retrieve the public keys of the selected contacts.
+	// For each friend selected get its pubKey from the DB
 	for _, cn := range rawChosenNames {
 		name := strings.TrimSpace(cn)
 		if name == "" {
@@ -404,7 +391,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
-	// Read wallet inactivity timeout.
+	// Timeout
 	fmt.Print("Enter inactivity timeout (e.g. 30s, 24h, 720h): ")
 	timeoutDur, err := time.ParseDuration(ReadInput(r))
 	if err != nil {
@@ -415,20 +402,33 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	fmt.Print("Give this wallet a local nickname: ")
 	walletName := ReadInput(r)
 
-	// Generate a wallet key pair.
-	// In a production system, the wallet key would typically be user-provided.
+	// We generate an ed25519 key
+	// In a real application the user would input his wallet's key
 	walletPubkey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		fmt.Printf("Failed to generate wallet keys: %v\n", err)
 		return
 	}
 
-	// Initialize the dealer and generate shares/commitments
 	var dealer crypto.Dealer
-	dealer.SetTsParameters(n, k)
-	dealer.SetSecret()
-	dealer.SetFriends(chosenNames)
-	dealer.SetCommAndShares()
+	err = dealer.SetTsParameters(n, k)
+	if err != nil {
+		fmt.Printf("Failed to set TsParameters: %v\n", err)
+	}
+	// In a real application the secret would be derived from some other context
+	// Here we just generate it as a demo
+	err = dealer.SetSecret()
+	if err != nil {
+		fmt.Printf("Failed to set secret: %v\n", err)
+	}
+	err = dealer.SetFriends(chosenNames)
+	if err != nil {
+		fmt.Printf("Failed to set friends: %v\n", err)
+	}
+	err = dealer.SetCommAndShares()
+	if err != nil {
+		fmt.Printf("Failed to set commitments or shares: %v\n", err)
+	}
 
 	commPoints := *dealer.GetComm()
 	commBytes := make([][]byte, len(commPoints))
@@ -442,7 +442,6 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	secret := dealer.GetSecret()
 	point := *new(crypto.Point).ScalarBaseMult(&secret)
 
-	// Build the registration request sent to the server.
 	regReq := api.RegisterRequest{
 		Username:            db.MyIdentity.Name,
 		PublicKey:           walletPubkey,
@@ -461,13 +460,13 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 		Signature: sign,
 	}
 
-	// Send wallet registration request.
+	// Request registration
 	if err := callAPI("POST", "/register", req, nil); err != nil {
 		fmt.Printf("Server registration failed: %v\n", err)
 		return
 	}
 
-	// Initialize key exchange components.
+	// Setup for keyexchange
 	provider := keyexchange.NewDefaultProvider()
 	dir := &ClientDirectory{
 		MyIdentity:     db.MyIdentity,
@@ -479,7 +478,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 
 	fmt.Println("Starting key exchange...")
 
-	// Start a key exchange session with each selected participant.
+	// Start a keyexchange for each selected participant
 	for i, cn := range chosenNames {
 		friendName := strings.TrimSpace(cn)
 
@@ -490,8 +489,8 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 		share_1 := dealer.GetParticipantShares(i)
 		shareBytes := share_1.Bytes()
 
-		// edwards25519 internal fields are private,
-		// therefore commitments must be manually serialized.
+		// edwards25519's struct fields are private, have to reverse unfortunately
+		// or they can't be marshaled
 		share := keyexchange.ShareMessage{
 			Index:       i + 1,
 			Share:       shareBytes,
@@ -501,17 +500,15 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 			WalletPub:   walletPubkey,
 		}
 
-		// Serialize the share message before transmission.
 		shareBlob, err := keyexchange.MarshalShare(share)
 		if err != nil {
 			fmt.Printf("Marshal error for share %s: %v\n", friendName, err)
 			continue
 		}
 
-		// Store the encrypted share until the handshake completes.
 		pendingMessages[friendName] = shareBlob
 
-		// Send the first handshake message.
+		// Send first message of keyexchange
 		state, err := keyexchange.StartAsInitiator(db.MyIdentity.Name, friendName, provider, dir, sender, myPriv)
 		if err != nil {
 			fmt.Printf("Failed handshake with %s: %v\n", friendName, err)
@@ -522,15 +519,13 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	}
 
 	wHex := hex.EncodeToString(walletPubkey)
-
-	// Store the wallet locally.
 	db.MyWallets[wHex] = walletName
 	SaveDB(db)
 
-	// Zeroize the secret from memory once it is no longer needed.
+	// zeroize the secret
 	secret = crypto.Scalar{}
 	runtime.KeepAlive(&secret)
-
+	
 	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
 	fmt.Println("Handshakes succesfully initiated")

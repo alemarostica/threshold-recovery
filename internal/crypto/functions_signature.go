@@ -105,12 +105,12 @@ func Challenge(sess *Session, R *Point, P *Point, msg []byte) (Scalar, error) {
 func VerifySignature(P Point, msg []byte, sig Signature, sess Session) (bool, error) {
 
 	/*
-	fmt.Printf("verify R: %x\n", sig.R.Bytes())
-	fmt.Printf("verify P: %x\n", P.Bytes())
-	fmt.Printf("verify sess.id: %x\n", sess.GetID())
-	fmt.Printf("verify sess.indexHash: %x\n", sess.GetIndexHash())
+		fmt.Printf("verify R: %x\n", sig.R.Bytes())
+		fmt.Printf("verify P: %x\n", P.Bytes())
+		fmt.Printf("verify sess.id: %x\n", sess.GetID())
+		fmt.Printf("verify sess.indexHash: %x\n", sess.GetIndexHash())
 	*/
-	
+
 	// Basic input validation
 	if len(sess.id) == 0 || len(sess.indexHash) == 0 {
 		return false, errors.New("VerifySignature failed: session length is wrong")

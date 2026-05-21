@@ -59,6 +59,6 @@ type ShareMessage struct {
 }
 
 type NonceMessage struct {
-	Index    crypto.ParticipantID `json:"participant_id"`
-	Ci       []byte               `json:"ci"`
+	Index crypto.ParticipantID `json:"participant_id"`
+	Ci    []byte               `json:"ci"`
 }
