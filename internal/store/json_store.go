@@ -73,8 +73,6 @@ func (s *JSONStore) RegisterWallet(w *core.Wallet, userPubKey ed25519.PublicKey)
 
 	path := filepath.Join(s.DataDir, w.ID+".json")
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Check if file exists
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("wallet for this public key already exists")
@@ -103,8 +101,6 @@ func (s *JSONStore) DeleteWallet(w *core.Wallet, userPubKey ed25519.PublicKey) e
 
 // Simply updates the liveliness, rewrites the entire file (could it be optimized? Maybe it is pointless to do so)
 func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	w, err := s.GetWallet(pubKey, userPubKey)
 	if err != nil {
 		return err
@@ -115,6 +111,8 @@ func (s *JSONStore) UpdateLiveness(pubKey []byte, userPubKey ed25519.PublicKey) 
 
 // Private helper to write files
 func (s *JSONStore) save(w *core.Wallet) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, err := json.MarshalIndent(w, "", "  ")
 	if err != nil {
 		return err

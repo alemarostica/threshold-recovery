@@ -200,7 +200,7 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			activeSessions[msg.From] = state
 		case keyexchange.M2:
 			// Initiator side: receives the handshake response.
-			
+
 			// Retrieve the session state associated with the sender
 			state, ok := activeSessions[msg.From]
 			if !ok {
@@ -279,7 +279,7 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			part.SetID(crypto.ParticipantID(message.Index))
 			part.SetShare(partShare)
 			part.SetName(message.Username)
-			
+
 			if ok, err := part.VerifyConsistency(rebuiltCommitments); err != nil {
 				fmt.Printf("Error while verifying share: %v\n", err)
 				continue
@@ -291,8 +291,8 @@ func pollRelay(db *LocalDB, dir *ClientDirectory) {
 			share := Share{
 				Username:  message.Username,
 				WalletPub: message.WalletPub,
-				Value: partShare.Bytes(),
-				Index: message.Index,
+				Value:     partShare.Bytes(),
+				Index:     message.Index,
 			}
 
 			// Save the verified share into the local database
@@ -313,7 +313,7 @@ func pingAllWallets(db *LocalDB) {
 		}
 
 		req := api.LivenessRequest{
-			Username: db.MyIdentity.Name,
+			Username:  db.MyIdentity.Name,
 			PublicKey: walletPubKey,
 			Timestamp: time.Now().Unix(),
 		}
@@ -328,7 +328,7 @@ func pingAllWallets(db *LocalDB) {
 
 		err = callAPI("POST", "/liveness", signedReq, nil)
 		if err != nil {
-			fmt.Printf("Failed liveness ping")
+			fmt.Printf("Failed liveness ping: %v\n", err)
 			continue
 		}
 	}
@@ -406,6 +406,17 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 		return
 	}
 
+	fmt.Print("Enter expiry date (YYYY-MM-DD): ")
+	expiryStr := ReadInput(r)
+	if expiryStr == "" {
+		fmt.Println("Expiry date can't be empty.")
+		return
+	}
+	if _, err := time.Parse("2006-01-02", expiryStr); err != nil {
+		fmt.Println("Invalid expiry date format. Use YYYY-MM-DD.")
+		return
+	}
+
 	fmt.Print("Give this wallet a local nickname: ")
 	walletName := ReadInput(r)
 
@@ -458,6 +469,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 		PubParams:           dealer.GetTsParameters(),
 		Commitments:         commBytes,
 		InactivityThreshold: timeoutDur,
+		ExpirationDate:      expiryStr,
 		P:                   point.Bytes(),
 	}
 
@@ -537,7 +549,7 @@ func CreateWallet(r *bufio.Reader, db *LocalDB) {
 	// Zeroize the secret from memory once it is no longer needed.
 	secret = crypto.Scalar{}
 	runtime.KeepAlive(&secret)
-	
+
 	fmt.Println("\nSUCCESS: Wallet registered on the server.")
 	fmt.Printf("WALLET PUBLIC KEY (HEX): %s\n", wHex)
 	fmt.Println("Handshakes succesfully initiated")

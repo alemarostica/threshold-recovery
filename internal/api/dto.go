@@ -26,6 +26,7 @@ type RegisterRequest struct {
 	PubParams           crypto.ThresholdParams `json:"public_params"`
 	Commitments         [][]byte               `json:"commitments"`
 	InactivityThreshold time.Duration          `json:"inactivity_threshold"`
+	ExpirationDate      string                 `json:"expiration_date"`
 	P                   []byte                 `json:"point"`
 }
 

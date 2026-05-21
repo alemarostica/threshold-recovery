@@ -937,7 +937,7 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Commitments) != req.PubParams.K + 1 {
+	if len(req.Commitments) != req.PubParams.K+1 {
 		http.Error(w, "Invalid length of commitments slice.", http.StatusBadRequest)
 		return
 	}
@@ -948,7 +948,7 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	point, _ := new(edwards25519.Point).SetBytes(req.P)
-	if point.Equal(edwards25519.NewIdentityPoint()) == 1{
+	if point.Equal(edwards25519.NewIdentityPoint()) == 1 {
 		http.Error(w, "Received an identity point as public key.", http.StatusBadRequest)
 		return
 	}
@@ -992,6 +992,12 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	expTime, err := time.Parse("2006-01-02", req.ExpirationDate)
+	if err != nil {
+		http.Error(w, "Invalid expiration date.", http.StatusBadRequest)
+		return
+	}
+
 	// Map the received DTO to the model
 	wallet := &core.Wallet{
 		PublicKey:           req.PublicKey,
@@ -1001,7 +1007,7 @@ func (h *Handler) handleRegisterWallet(w http.ResponseWriter, r *http.Request) {
 		InactivityThreshold: req.InactivityThreshold,
 		// Default expiration = Now + Threshold
 		// Can be changed to have a specific date
-		ExpirationDate:  time.Now().Add(req.InactivityThreshold),
+		ExpirationDate:  expTime,
 		ThresholdParams: req.PubParams,
 		P:               req.P,
 	}
