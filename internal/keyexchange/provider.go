@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
