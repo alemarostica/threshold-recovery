@@ -93,6 +93,9 @@ func (p *DefaultProvider) Encrypt(key, plaintext, aad []byte) ([]byte, []byte, e
 		return nil, nil, err
 	}
 
+	clear(key)
+	runtime.KeepAlive(key)
+
 	// Generate random nonce.
 	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
@@ -114,6 +117,9 @@ func (p *DefaultProvider) Decrypt(key, nonce, ciphertext, aad []byte) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+
+	clear(key)
+	runtime.KeepAlive(key)
 
 	// Decrypt and verify.
 	return aead.Open(nil, nonce, ciphertext, aad)
